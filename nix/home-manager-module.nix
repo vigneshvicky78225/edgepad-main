@@ -1,0 +1,299 @@
+self:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+let
+  cfg = config.services.edgepad;
+  toml = pkgs.formats.toml { };
+  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.edgepad;
+  commandActionType = lib.types.nonEmptyListOf lib.types.str;
+  configPath = "${config.xdg.configHome}/edgepad/edgepad.toml";
+
+  edgeWidthOverrideOption =
+    edge:
+    lib.mkOption {
+      type = lib.types.nullOr lib.types.float;
+      default = null;
+      example = 0.08;
+      apply =
+        value:
+        if value == null || (value > 0.0 && value < 0.5) then
+          value
+        else
+          throw "services.edgepad.edgeWidths.${edge} must be null or > 0 and < 0.5";
+      description = "Optional fractional width override for the ${edge} edge.";
+    };
+
+  gestureType = lib.types.submodule {
+    options = {
+      zone = lib.mkOption {
+        type = lib.types.enum [
+          "left"
+          "right"
+          "top"
+          "bottom"
+        ];
+        description = "Edge zone that must claim the gesture.";
+      };
+
+      direction = lib.mkOption {
+        type = lib.types.enum [
+          "up"
+          "down"
+          "left"
+          "right"
+          "tap"
+          "double-tap"
+        ];
+        description = "Recognized gesture direction.";
+      };
+
+      action = lib.mkOption {
+        type = commandActionType;
+        example = [
+          "notify-send"
+          "edgepad"
+          "top-right"
+        ];
+        description = "Command argv to run for the gesture. The command is not run through a shell.";
+      };
+    };
+  };
+
+  sliderActionOption =
+    direction:
+    lib.mkOption {
+      type = lib.types.nullOr commandActionType;
+      default = null;
+      example = [
+        "notify-send"
+        "edgepad"
+        direction
+      ];
+      description = "Command argv to run for the ${direction} slider step.";
+    };
+
+  sliderType = lib.types.submodule {
+    options = {
+      zone = lib.mkOption {
+        type = lib.types.enum [
+          "left"
+          "right"
+          "top"
+          "bottom"
+        ];
+        description = "Edge zone that owns this continuous slider.";
+      };
+
+      step = lib.mkOption {
+        type = lib.types.float;
+        default = 0.04;
+        apply =
+          value:
+          if value > 0.0 && value <= 1.0 then
+            value
+          else
+            throw "services.edgepad.sliders.*.step must be > 0 and <= 1";
+        description = "Normalized touchpad movement required to emit one slider step.";
+      };
+
+      up = sliderActionOption "up";
+      down = sliderActionOption "down";
+      left = sliderActionOption "left";
+      right = sliderActionOption "right";
+    };
+  };
+
+  sliderToToml =
+    slider:
+    {
+      inherit (slider) zone step;
+    }
+    // lib.optionalAttrs (slider.up != null) { inherit (slider) up; }
+    // lib.optionalAttrs (slider.down != null) { inherit (slider) down; }
+    // lib.optionalAttrs (slider.left != null) { inherit (slider) left; }
+    // lib.optionalAttrs (slider.right != null) { inherit (slider) right; };
+
+  configFile = toml.generate "edgepad.toml" (
+    {
+      device = cfg.device;
+      edge_width = cfg.edgeWidth;
+      tap_min_duration_ms = cfg.tapMinDurationMs;
+      tap_max_duration_ms = cfg.tapMaxDurationMs;
+      double_tap_timeout_ms = cfg.doubleTapTimeoutMs;
+      double_tap_max_distance = cfg.doubleTapMaxDistance;
+      swipe_min_distance = cfg.swipeMinDistance;
+      gestures = map (gesture: {
+        inherit (gesture) zone direction action;
+      }) cfg.gestures;
+      sliders = map sliderToToml cfg.sliders;
+    }
+    // lib.filterAttrs (_: value: value != null) {
+      left_edge_width = cfg.edgeWidths.left;
+      right_edge_width = cfg.edgeWidths.right;
+      top_edge_width = cfg.edgeWidths.top;
+      bottom_edge_width = cfg.edgeWidths.bottom;
+    }
+  );
+in
+{
+  options.services.edgepad = {
+    enable = lib.mkEnableOption "edgepad touchpad edge gesture daemon";
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = defaultPackage;
+      defaultText = lib.literalExpression "inputs.edgepad.packages.\${pkgs.stdenv.hostPlatform.system}.edgepad";
+      description = "edgepad package used by the user service.";
+    };
+
+    device = lib.mkOption {
+      type = lib.types.str;
+      default = "auto";
+      example = "/dev/input/event7";
+      description = "`auto` or an explicit /dev/input/eventX path.";
+    };
+
+    edgeWidth = lib.mkOption {
+      type = lib.types.float;
+      default = 0.10;
+      apply =
+        value:
+        if value > 0.0 && value < 0.5 then
+          value
+        else
+          throw "services.edgepad.edgeWidth must be > 0 and < 0.5";
+      description = "Default fractional width used by edges without a per-edge override.";
+    };
+
+    edgeWidths = lib.mkOption {
+      type = lib.types.submodule {
+        options = {
+          left = edgeWidthOverrideOption "left";
+          right = edgeWidthOverrideOption "right";
+          top = edgeWidthOverrideOption "top";
+          bottom = edgeWidthOverrideOption "bottom";
+        };
+      };
+      default = { };
+      description = "Optional per-edge width overrides; unset edges use services.edgepad.edgeWidth.";
+    };
+
+    tapMinDurationMs = lib.mkOption {
+      type = lib.types.ints.between 0 10000;
+      default = 40;
+      description = "Minimum edge contact duration in milliseconds required for a tap gesture.";
+    };
+
+    tapMaxDurationMs = lib.mkOption {
+      type = lib.types.ints.between 1 10000;
+      default = 180;
+      description = "Maximum edge contact duration in milliseconds allowed for a tap gesture.";
+    };
+
+    doubleTapTimeoutMs = lib.mkOption {
+      type = lib.types.ints.between 1 10000;
+      default = 300;
+      description = "Maximum gap in milliseconds between taps in a double-tap sequence.";
+    };
+
+    doubleTapMaxDistance = lib.mkOption {
+      type = lib.types.float;
+      default = 0.04;
+      apply =
+        value:
+        if value > 0.0 && value <= 1.0 then
+          value
+        else
+          throw "services.edgepad.doubleTapMaxDistance must be > 0 and <= 1";
+      description = "Maximum normalized distance between taps in a double-tap sequence.";
+    };
+
+    swipeMinDistance = lib.mkOption {
+      type = lib.types.float;
+      default = 0.02;
+      apply =
+        value:
+        if value > 0.0 && value <= 1.0 then
+          value
+        else
+          throw "services.edgepad.swipeMinDistance must be > 0 and <= 1";
+      description = "Normalized touchpad travel required to classify an edge contact as a swipe.";
+    };
+
+    gestures = lib.mkOption {
+      type = lib.types.listOf gestureType;
+      default = [ ];
+      example = lib.literalExpression ''
+        [
+          {
+            zone = "right";
+            direction = "down";
+            action = [ "notify-send" "edgepad" "right-down" ];
+          }
+        ]
+      '';
+      description = "Gesture bindings written to edgepad's TOML config.";
+    };
+
+    sliders = lib.mkOption {
+      type = lib.types.listOf sliderType;
+      default = [ ];
+      example = lib.literalExpression ''
+        [
+          {
+            zone = "right";
+            up = [ "brightnessctl" "set" "+5%" ];
+            down = [ "brightnessctl" "set" "5%-" ];
+          }
+        ]
+      '';
+      description = "Continuous slider bindings written to edgepad's TOML config.";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.tapMinDurationMs < cfg.tapMaxDurationMs;
+        message = "services.edgepad.tapMinDurationMs must be less than tapMaxDurationMs";
+      }
+    ];
+
+    home.packages = [ cfg.package ];
+
+    xdg.configFile."edgepad/edgepad.toml".source = configFile;
+
+    systemd.user.services.edgepad = {
+      Unit = {
+        Description = "edgepad touchpad edge gesture daemon";
+        After = [ "graphical-session.target" ];
+        PartOf = [ "graphical-session.target" ];
+        "X-Reload-Triggers" = [ configFile ];
+      };
+
+      Service = {
+        Type = "notify";
+        NotifyAccess = "main";
+        TimeoutStartSec = "45s";
+        ExecStart = lib.escapeShellArgs [
+          (lib.getExe cfg.package)
+          "daemon"
+          "--config"
+          configPath
+          "--device"
+          cfg.device
+        ];
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
+        Restart = "on-failure";
+        RestartSec = "1s";
+      };
+
+      Install.WantedBy = [ "graphical-session.target" ];
+    };
+  };
+}

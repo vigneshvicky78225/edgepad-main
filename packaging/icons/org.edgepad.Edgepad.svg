@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a2e39"/>
+      <stop offset="100%" stop-color="#181a20"/>
+    </linearGradient>
+    <linearGradient id="edgeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3daee9"/>
+      <stop offset="100%" stop-color="#1d6fa5"/>
+    </linearGradient>
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="100%" stop-color="#3a7bd5"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Base Shadow -->
+  <rect x="14" y="22" width="100" height="88" rx="16" fill="#000000" opacity="0.4"/>
+
+  <!-- Outer Trackpad Body -->
+  <rect x="14" y="18" width="100" height="88" rx="16" fill="url(#bodyGrad)" stroke="#3a4050" stroke-width="2"/>
+
+  <!-- Left Edge Gesture Strip (Illuminated Cyan) -->
+  <rect x="18" y="22" width="14" height="80" rx="6" fill="url(#edgeGrad)" filter="url(#glow)"/>
+  <!-- Left Swipe Arrow (Up) -->
+  <path d="M 25 36 L 21 44 L 29 44 Z" fill="#ffffff"/>
+  <rect x="23.5" y="44" width="3" height="16" fill="#ffffff"/>
+  <!-- Left Swipe Arrow (Down) -->
+  <path d="M 25 88 L 21 80 L 29 80 Z" fill="#ffffff"/>
+  <rect x="23.5" y="68" width="3" height="12" fill="#ffffff"/>
+
+  <!-- Right Edge Gesture Strip (Illuminated Green/Teal) -->
+  <rect x="96" y="22" width="14" height="80" rx="6" fill="#27ae60" filter="url(#glow)"/>
+  <!-- Right Swipe Arrow (Up) -->
+  <path d="M 103 36 L 99 44 L 107 44 Z" fill="#ffffff"/>
+  <rect x="101.5" y="44" width="3" height="16" fill="#ffffff"/>
+  <!-- Right Swipe Arrow (Down) -->
+  <path d="M 103 88 L 99 80 L 107 80 Z" fill="#ffffff"/>
+  <rect x="101.5" y="68" width="3" height="12" fill="#ffffff"/>
+
+  <!-- Center Trackpad Glass Area -->
+  <rect x="36" y="22" width="56" height="80" rx="8" fill="#20242e" stroke="#2c3240" stroke-width="1"/>
+
+  <!-- Touch Point Hand / Pulse Symbol in Center -->
+  <circle cx="64" cy="56" r="10" fill="none" stroke="#3daee9" stroke-width="2" opacity="0.6"/>
+  <circle cx="64" cy="56" r="4" fill="#3daee9"/>
+
+  <!-- Subtle bottom button separator line -->
+  <line x1="64" y1="88" x2="64" y2="102" stroke="#2c3240" stroke-width="2"/>
+</svg>

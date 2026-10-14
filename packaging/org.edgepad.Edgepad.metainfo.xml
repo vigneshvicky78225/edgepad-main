@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.edgepad.Edgepad</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>Edgepad</name>
+  <summary>Native Linux Touchpad Edge Gesture Manager</summary>
+  <description>
+    <p>
+      Edgepad turns the unused physical edges of your laptop touchpad into customizable swipe
+      zones for hardware control. Swipe up or down on the left edge to adjust display brightness,
+      or on the right edge to control system audio volume.
+    </p>
+    <p>Features include:</p>
+    <ul>
+      <li>Native Qt 6 and KDE Plasma Wayland graphical settings manager</li>
+      <li>Reliable Linux /dev/uinput physical keyboard event emulation (KEY_BRIGHTNESSUP, KEY_VOLUMEDOWN, etc.)</li>
+      <li>Passive and non-intrusive multi-touch routing: center touchpad clicks and scrolling remain 100% unaffected</li>
+      <li>Live diagnostic tester with simulated actions and real-time telemetry</li>
+      <li>User-level systemd daemon management and start-at-login integration</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">org.edgepad.Edgepad.desktop</launchable>
+  <url type="homepage">https://github.com/assembledev/edgepad</url>
+  <provides>
+    <binary>edgepad</binary>
+  </provides>
+  <categories>
+    <category>Settings</category>
+    <category>HardwareSettings</category>
+    <category>Utility</category>
+  </categories>
+</component>

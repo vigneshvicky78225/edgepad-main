@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Edgepad
+GenericName=Touchpad Edge Gesture Manager
+Comment=Configure and manage touchpad edge swipe gestures for brightness, volume, and desktop controls
+Exec=edgepad gui
+Icon=org.edgepad.Edgepad
+Terminal=false
+Type=Application
+Categories=Settings;HardwareSettings;Utility;Qt;
+Keywords=touchpad;gesture;edge;swipe;brightness;volume;wayland;kde;plasma;input;
+StartupNotify=true
+StartupWMClass=Edgepad
+X-KDE-SubstituteUID=false
