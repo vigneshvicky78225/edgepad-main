@@ -44,6 +44,7 @@ fn virtual_touchpad_spec_mirrors_composer_output_capabilities() {
             VirtualAbsAxis::new(ABS_MT_POSITION_Y, 20, 820),
         ]
     );
+    assert_eq!(spec.input_id, None);
     assert!(spec.misc.is_empty());
 }
 
@@ -52,6 +53,20 @@ fn virtual_touchpad_spec_can_use_a_custom_public_name() {
     let spec = VirtualTouchpadSpec::named(test_capabilities(), "edgepad test device");
 
     assert_eq!(spec.name, "edgepad test device");
+    assert_eq!(spec.input_id, None);
+}
+
+#[test]
+fn virtual_touchpad_spec_supports_mirrored_input_id() {
+    use evdev::{BusType, InputId};
+    let mut spec = VirtualTouchpadSpec::named(test_capabilities(), "mirrored touchpad");
+    spec.input_id = Some(InputId::new(BusType::BUS_I2C, 0x093a, 0x3848, 0x0100));
+
+    let id = spec.input_id.unwrap();
+    assert_eq!(id.bus_type(), BusType::BUS_I2C);
+    assert_eq!(id.vendor(), 0x093a);
+    assert_eq!(id.product(), 0x3848);
+    assert_eq!(id.version(), 0x0100);
 }
 
 #[test]

@@ -121,7 +121,7 @@ def main() -> int:
     QQuickStyle.setStyle("org.kde.desktop")
 
     app = QApplication(sys.argv)
-    app.setDesktopFileName("org.edgepad.Edgepad.desktop")
+    app.setDesktopFileName("org.edgepad.Edgepad")
 
     # Controller instance
     controller = EdgepadController()

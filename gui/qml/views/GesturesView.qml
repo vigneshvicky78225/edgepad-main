@@ -50,6 +50,11 @@ Item {
             }
         }
 
+        // Encoder Settings & Live Diagnostics Card
+        EncoderSettingsCard {
+            Layout.fillWidth: true
+        }
+
         // Rule List
         ScrollView {
             Layout.fillWidth: true

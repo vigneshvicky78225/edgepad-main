@@ -1,5 +1,7 @@
+%global debug_package %{nil}
+
 Name:           edgepad
-Version:        0.1.0
+Version:        0.2.5
 Release:        1%{?dist}
 Summary:        Native Linux Touchpad Edge Gesture Manager
 
@@ -24,10 +26,12 @@ configure brightness, volume, and desktop controls with fine-tuned sensitivity
 and zero terminal interaction.
 
 %prep
-%autosetup
+%autosetup -n %{name}-%{version}
 
 %build
-cargo build --release --locked
+# Ensure cargo from rustup or system is found in PATH
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo build --offline --release --locked
 
 %install
 # Install main Rust binary
@@ -47,8 +51,10 @@ install -Dpm 0644 packaging/org.edgepad.Edgepad.metainfo.xml %{buildroot}%{_meta
 # Install desktop icon
 install -Dpm 0644 packaging/icons/org.edgepad.Edgepad.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/org.edgepad.Edgepad.svg
 
-# Install systemd user service
-install -Dpm 0644 packaging/edgepad.service %{buildroot}%{_userunitdir}/edgepad.service
+# Install systemd user service (adjust path for system install)
+install -d %{buildroot}%{_userunitdir}
+sed 's|%h/\.local/bin/edgepad|%{_bindir}/edgepad|g' packaging/edgepad.service > %{buildroot}%{_userunitdir}/edgepad.service
+chmod 0644 %{buildroot}%{_userunitdir}/edgepad.service
 
 # Install udev rules for touchpad and uinput permissions
 install -Dpm 0644 packaging/70-edgepad.rules %{buildroot}%{_udevrulesdir}/70-edgepad.rules
@@ -79,5 +85,5 @@ fi
 %{_udevrulesdir}/70-edgepad.rules
 
 %changelog
-* Wed Oct 14 2026 Edgepad Team <edgepad@example.org> - 0.1.0-1
+* Wed Oct 14 2026 Edgepad Team <edgepad@example.org> - 0.2.5-1
 - Initial release with native Qt 6 QML GUI and uinput virtual keyboard backend

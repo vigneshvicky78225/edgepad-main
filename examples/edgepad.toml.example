@@ -14,6 +14,14 @@ double_tap_timeout_ms = 300
 double_tap_max_distance = 0.04
 swipe_min_distance = 0.02
 
+# Rotary encoder behavior for vertical edge swipes:
+# A short swipe produces few key presses; a longer swipe produces proportionally more.
+[encoder]
+enabled = true
+step_size = 50.0          # Touchpad coordinate units per tick (or fraction if < 1.0)
+dead_zone = 10.0          # Coordinate units of jitter filtering before ticks accumulate
+repeat_interval_ms = 20   # Interval between generated discrete key events (5-100 ms)
+
 [[sliders]]
 zone = "left"
 step = 0.04

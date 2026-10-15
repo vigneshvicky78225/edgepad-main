@@ -208,5 +208,84 @@ class TestEdgepadGuiBackend(unittest.TestCase):
         self.assertGreaterEqual(report["summary"]["ok"], 1)
 
 
+    def test_encoder_configuration_loading_and_saving(self):
+        """Verify encoder settings persist correctly through TOML serialization."""
+        preset = default_preset_config()
+        self.assertIn("encoder", preset)
+        self.assertTrue(preset["encoder"]["enabled"])
+        self.assertEqual(preset["encoder"]["step_size"], 50.0)
+        self.assertEqual(preset["encoder"]["dead_zone"], 10.0)
+        self.assertEqual(preset["encoder"]["repeat_interval_ms"], 20)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = Path(tmp_dir) / "edgepad.toml"
+            cm = ConfigManager(cfg_path)
+
+            custom_cfg = copy.deepcopy(preset)
+            custom_cfg["encoder"]["step_size"] = 75.0
+            custom_cfg["encoder"]["dead_zone"] = 15.0
+            custom_cfg["encoder"]["repeat_interval_ms"] = 35
+
+            ok, err = cm.save_config(custom_cfg)
+            self.assertTrue(ok, f"Save failed: {err}")
+
+            with open(cfg_path, "r") as f:
+                toml_text = f.read()
+            self.assertIn("[encoder]", toml_text)
+            self.assertIn("step_size = 75.0", toml_text)
+            self.assertIn("dead_zone = 15.0", toml_text)
+            self.assertIn("repeat_interval_ms = 35", toml_text)
+
+            loaded, err = cm.load_config()
+            self.assertIsNone(err)
+            self.assertEqual(loaded["encoder"]["step_size"], 75.0)
+            self.assertEqual(loaded["encoder"]["dead_zone"], 15.0)
+            self.assertEqual(loaded["encoder"]["repeat_interval_ms"], 35)
+
+    def test_encoder_controller_properties_and_diagnostics(self):
+        """Verify EdgepadController exposes encoder properties, slots, and live diagnostics."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = Path(tmp_dir) / "edgepad.toml"
+            cm = ConfigManager(cfg_path)
+            cm.save_config(default_preset_config())
+
+            ctrl = EdgepadController()
+            ctrl.config_manager = cm
+            ctrl._load_initial_state()
+
+            self.assertTrue(ctrl.encoderEnabled)
+            self.assertEqual(ctrl.encoderStepSize, 50.0)
+            self.assertEqual(ctrl.encoderDeadZone, 10.0)
+            self.assertEqual(ctrl.encoderRepeatIntervalMs, 20)
+
+            ctrl.setEncoderStepSize(60.0)
+            ctrl.setEncoderDeadZone(12.0)
+            ctrl.setEncoderRepeatIntervalMs(25)
+            self.assertEqual(ctrl.encoderStepSize, 60.0)
+            self.assertEqual(ctrl.encoderDeadZone, 12.0)
+            self.assertEqual(ctrl.encoderRepeatIntervalMs, 25)
+
+            # Test live event simulation
+            ctrl._on_ipc_event({
+                "event": "slider_step",
+                "zone": "right",
+                "direction": "up",
+                "key": "KEY_VOLUMEUP",
+                "key_code": 115,
+            })
+            self.assertEqual(ctrl.encoderLiveEdge, "Right")
+            self.assertEqual(ctrl.encoderLiveDirection, "Up")
+            self.assertEqual(ctrl.encoderLiveIncremental, 60.0)
+            self.assertGreaterEqual(ctrl.encoderLiveTicks, 1)
+            self.assertEqual(ctrl.encoderLiveKey, "KEY_VOLUMEUP")
+
+            # Restore defaults
+            ctrl.restoreEncoderDefaults()
+            self.assertTrue(ctrl.encoderEnabled)
+            self.assertEqual(ctrl.encoderStepSize, 50.0)
+            self.assertEqual(ctrl.encoderDeadZone, 10.0)
+            self.assertEqual(ctrl.encoderRepeatIntervalMs, 20)
+
+
 if __name__ == "__main__":
     unittest.main()

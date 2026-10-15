@@ -1114,12 +1114,14 @@ struct DaemonRuntimeHandler {
 
 impl DaemonRuntimeHandler {
     fn new(args: &DaemonArgs, reload: ReloadToken) -> Result<Self, String> {
+        let dispatcher = ActionDispatcher::new_with_sliders(
+            args.config.gestures.clone(),
+            args.config.sliders.clone(),
+            DAEMON_ACTION_QUEUE_CAPACITY,
+        )?;
+        dispatcher.set_repeat_interval_ms(args.config.encoder.repeat_interval.as_millis() as u64);
         Ok(Self {
-            dispatcher: ActionDispatcher::new_with_sliders(
-                args.config.gestures.clone(),
-                args.config.sliders.clone(),
-                DAEMON_ACTION_QUEUE_CAPACITY,
-            )?,
+            dispatcher,
             config_path: args.config_path.clone(),
             overrides: args.overrides.clone(),
             active_config: args.config.clone(),
@@ -1165,6 +1167,8 @@ impl DaemonRuntimeHandler {
         };
         self.dispatcher
             .reconfigure(candidate.gestures.clone(), candidate.sliders.clone());
+        self.dispatcher
+            .set_repeat_interval_ms(candidate.encoder.repeat_interval.as_millis() as u64);
         self.active_config = candidate;
         eprintln!(
             "edgepad daemon: reload complete; edge_widths={} gesture_bindings={} sliders={}",

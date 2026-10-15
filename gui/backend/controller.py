@@ -43,6 +43,8 @@ class EdgepadController(QObject):
     serviceLogsChanged = Signal()
     hasUnsavedChangesChanged = Signal(bool)
     notificationRequested = Signal(str, str)  # title, message
+    encoderSettingsChanged = Signal()
+    encoderDiagnosticsChanged = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -78,6 +80,23 @@ class EdgepadController(QObject):
         self._doctor_report: dict[str, Any] = {}
         self._service_logs = ""
         self._has_unsaved_changes = False
+
+        # Encoder settings & live diagnostics
+        self._encoder_enabled = True
+        self._encoder_step_size = 50.0
+        self._encoder_dead_zone = 10.0
+        self._encoder_repeat_interval_ms = 20
+        self._encoder_live_edge = "None"
+        self._encoder_live_direction = "None"
+        self._encoder_live_incremental = 0.0
+        self._encoder_live_distance = 0.0
+        self._encoder_live_ticks = 0
+        self._encoder_live_key = ""
+
+        self._encoder_diag_timer = QTimer(self)
+        self._encoder_diag_timer.setSingleShot(True)
+        self._encoder_diag_timer.setInterval(2500)
+        self._encoder_diag_timer.timeout.connect(self._on_encoder_diag_timeout)
 
         # Hook IPC client
         self.ipc_client.event_received.connect(self._on_ipc_event)
@@ -125,11 +144,18 @@ class EdgepadController(QObject):
             "tap_max_movement": int(engine.get("tap_max_movement", 50)),
         }
 
+        encoder = cfg.get("encoder", {})
+        self._encoder_enabled = bool(encoder.get("enabled", True))
+        self._encoder_step_size = float(encoder.get("step_size", 50.0))
+        self._encoder_dead_zone = float(encoder.get("dead_zone", 10.0))
+        self._encoder_repeat_interval_ms = int(encoder.get("repeat_interval_ms", 20))
+
         self._has_unsaved_changes = False
         self.selectedDeviceChanged.emit(self._selected_device)
         self.gestureRulesChanged.emit()
         self.sliderRulesChanged.emit()
         self.edgeSettingsChanged.emit()
+        self.encoderSettingsChanged.emit()
         self.masterEnabledChanged.emit(self._master_enabled)
         self.hasUnsavedChangesChanged.emit(False)
         self._update_selected_device_details()
@@ -241,6 +267,47 @@ class EdgepadController(QObject):
     def hasUnsavedChanges(self) -> bool:
         return self._has_unsaved_changes
 
+    # --- Encoder Properties ---
+    @Property(bool, notify=encoderSettingsChanged)
+    def encoderEnabled(self) -> bool:
+        return self._encoder_enabled
+
+    @Property(float, notify=encoderSettingsChanged)
+    def encoderStepSize(self) -> float:
+        return self._encoder_step_size
+
+    @Property(float, notify=encoderSettingsChanged)
+    def encoderDeadZone(self) -> float:
+        return self._encoder_dead_zone
+
+    @Property(int, notify=encoderSettingsChanged)
+    def encoderRepeatIntervalMs(self) -> int:
+        return self._encoder_repeat_interval_ms
+
+    @Property(str, notify=encoderDiagnosticsChanged)
+    def encoderLiveEdge(self) -> str:
+        return self._encoder_live_edge
+
+    @Property(str, notify=encoderDiagnosticsChanged)
+    def encoderLiveDirection(self) -> str:
+        return self._encoder_live_direction
+
+    @Property(float, notify=encoderDiagnosticsChanged)
+    def encoderLiveIncremental(self) -> float:
+        return self._encoder_live_incremental
+
+    @Property(float, notify=encoderDiagnosticsChanged)
+    def encoderLiveDistance(self) -> float:
+        return self._encoder_live_distance
+
+    @Property(int, notify=encoderDiagnosticsChanged)
+    def encoderLiveTicks(self) -> int:
+        return self._encoder_live_ticks
+
+    @Property(str, notify=encoderDiagnosticsChanged)
+    def encoderLiveKey(self) -> str:
+        return self._encoder_live_key
+
     @Property(list, constant=True)
     def knownKeys(self) -> list[dict[str, Any]]:
         return KNOWN_KEYS
@@ -339,6 +406,12 @@ class EdgepadController(QObject):
                 "cooldown_ms": self._edge_settings.get("cooldown_ms", 250),
                 "tap_max_duration_ms": self._edge_settings.get("tap_max_duration_ms", 200),
                 "tap_max_movement": self._edge_settings.get("tap_max_movement", 50),
+            },
+            "encoder": {
+                "enabled": self._encoder_enabled,
+                "step_size": self._encoder_step_size,
+                "dead_zone": self._encoder_dead_zone,
+                "repeat_interval_ms": self._encoder_repeat_interval_ms,
             },
             "gestures": self._gesture_rules,
             "sliders": self._slider_rules,
@@ -529,6 +602,63 @@ class EdgepadController(QObject):
     def filterKeys(self, query: str) -> list[dict[str, Any]]:
         return search_keys(query)
 
+    # --- Encoder Slots ---
+
+    @Slot(bool)
+    def setEncoderEnabled(self, enabled: bool) -> None:
+        if self._encoder_enabled != enabled:
+            self._encoder_enabled = enabled
+            self._has_unsaved_changes = True
+            self.hasUnsavedChangesChanged.emit(True)
+            self.encoderSettingsChanged.emit()
+
+    @Slot(float)
+    def setEncoderStepSize(self, step_size: float) -> None:
+        step_size = max(5.0, min(500.0, float(step_size)))
+        if abs(self._encoder_step_size - step_size) > 0.01:
+            self._encoder_step_size = step_size
+            self._has_unsaved_changes = True
+            self.hasUnsavedChangesChanged.emit(True)
+            self.encoderSettingsChanged.emit()
+
+    @Slot(float)
+    def setEncoderDeadZone(self, dead_zone: float) -> None:
+        dead_zone = max(0.0, min(100.0, float(dead_zone)))
+        if abs(self._encoder_dead_zone - dead_zone) > 0.01:
+            self._encoder_dead_zone = dead_zone
+            self._has_unsaved_changes = True
+            self.hasUnsavedChangesChanged.emit(True)
+            self.encoderSettingsChanged.emit()
+
+    @Slot(int)
+    def setEncoderRepeatIntervalMs(self, interval_ms: int) -> None:
+        interval_ms = max(5, min(200, int(interval_ms)))
+        if self._encoder_repeat_interval_ms != interval_ms:
+            self._encoder_repeat_interval_ms = interval_ms
+            self._has_unsaved_changes = True
+            self.hasUnsavedChangesChanged.emit(True)
+            self.encoderSettingsChanged.emit()
+
+    @Slot()
+    def restoreEncoderDefaults(self) -> None:
+        self._encoder_enabled = True
+        self._encoder_step_size = 50.0
+        self._encoder_dead_zone = 10.0
+        self._encoder_repeat_interval_ms = 20
+        self._has_unsaved_changes = True
+        self.hasUnsavedChangesChanged.emit(True)
+        self.encoderSettingsChanged.emit()
+
+    @Slot()
+    def resetEncoderDiagnostics(self) -> None:
+        self._encoder_live_edge = "None"
+        self._encoder_live_direction = "None"
+        self._encoder_live_incremental = 0.0
+        self._encoder_live_distance = 0.0
+        self._encoder_live_ticks = 0
+        self._encoder_live_key = ""
+        self.encoderDiagnosticsChanged.emit()
+
     # --- Private Handlers ---
 
     def _on_ipc_event(self, event_data: dict[str, Any]) -> None:
@@ -537,6 +667,24 @@ class EdgepadController(QObject):
         event_copy["time"] = datetime.datetime.now().strftime("%H:%M:%S")
         self._last_gesture = event_copy
         self.lastGestureChanged.emit()
+
+        evt_type = event_data.get("event")
+        if evt_type in ("slider_step", "encoder_tick"):
+            zone_str = str(event_data.get("zone", "")).capitalize()
+            dir_str = str(event_data.get("direction", "")).capitalize()
+            self._encoder_live_edge = zone_str if zone_str else "Edge"
+            self._encoder_live_direction = dir_str
+            self._encoder_live_incremental = self._encoder_step_size
+            self._encoder_live_ticks += 1
+            self._encoder_live_distance = round(self._encoder_live_ticks * self._encoder_step_size, 1)
+            self._encoder_live_key = str(event_data.get("key", ""))
+            self.encoderDiagnosticsChanged.emit()
+            if self._encoder_diag_timer:
+                self._encoder_diag_timer.start()
+
+    def _on_encoder_diag_timeout(self) -> None:
+        # Keep direction and final tick count visible but mark inactive
+        self.encoderDiagnosticsChanged.emit()
 
     def _on_ipc_connection_changed(self, connected: bool) -> None:
         self.connectedToIpcChanged.emit(connected)

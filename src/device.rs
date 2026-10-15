@@ -196,7 +196,18 @@ pub fn touchpad_candidates(summaries: &[DeviceSummary]) -> Vec<&DeviceSummary> {
 }
 
 fn is_edgepad_virtual_touchpad(summary: &DeviceSummary) -> bool {
-    summary.name == DEFAULT_VIRTUAL_TOUCHPAD_NAME
+    if summary.name == DEFAULT_VIRTUAL_TOUCHPAD_NAME {
+        return true;
+    }
+    if let Some(file_name) = summary.path.file_name() {
+        let sys_path = Path::new("/sys/class/input").join(file_name).join("device");
+        if let Ok(target) = fs::canonicalize(&sys_path) {
+            if target.to_string_lossy().contains("/devices/virtual/") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn format_device_line(summary: &DeviceSummary) -> String {

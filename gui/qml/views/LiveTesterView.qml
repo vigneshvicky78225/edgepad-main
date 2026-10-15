@@ -223,5 +223,10 @@ ScrollView {
                 }
             }
         }
+
+        // Encoder Telemetry & Controls
+        EncoderSettingsCard {
+            Layout.fillWidth: true
+        }
     }
 }

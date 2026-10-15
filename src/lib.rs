@@ -18,6 +18,7 @@ pub mod config;
 pub mod device;
 pub mod doctor;
 pub mod dump;
+pub mod encoder;
 pub mod ipc;
 pub mod keyboard;
 pub mod notify;
@@ -202,6 +203,7 @@ pub mod core {
         pub double_tap_max_distance: f32,
         pub double_tap_zones: ZoneSet,
         pub single_tap_zones: ZoneSet,
+        pub encoder: crate::encoder::EncoderConfig,
     }
 
     impl Default for EngineOptions {
@@ -214,6 +216,10 @@ pub mod core {
                 double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
                 double_tap_zones: ZoneSet::default(),
                 single_tap_zones: ZoneSet::all(),
+                encoder: crate::encoder::EncoderConfig {
+                    enabled: false,
+                    ..crate::encoder::EncoderConfig::default()
+                },
             }
         }
     }
@@ -314,6 +320,7 @@ pub mod core {
         tap_sequence_match: bool,
         slider_anchor: Option<f32>,
         held_events: Vec<Event>,
+        encoder: Option<crate::encoder::EncoderAccumulator>,
     }
 
     impl Default for SlotState {
@@ -335,6 +342,7 @@ pub mod core {
                 tap_sequence_match: false,
                 slider_anchor: None,
                 held_events: Vec::new(),
+                encoder: None,
             }
         }
     }
@@ -762,7 +770,8 @@ pub mod core {
             let slot = self.current_slot;
             match self.slot(slot)?.ownership {
                 Ownership::Claimed(zone) => {
-                    let releases_slider_zone = self.slider_for_zone(zone).is_some();
+                    let releases_slider_zone = self.slider_for_zone(zone).is_some()
+                        || (self.options.encoder.enabled && matches!(zone, Zone::Left | Zone::Right));
                     let options = self.options;
                     let capabilities = self.caps;
                     let classified = {
@@ -952,67 +961,111 @@ pub mod core {
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
-            let (zone, spec, position, tracking_id) = {
+            let (zone, current_y, tracking_id) = {
                 let slot_state = self.slot(slot)?;
                 let Ownership::Claimed(zone) = slot_state.ownership else {
                     return Ok(());
                 };
-                let Some(spec) = self.slider_for_zone(zone) else {
-                    return Ok(());
-                };
-                let Some(position) = slider_position(self.caps, spec.axis, slot_state) else {
+                let Some(current_y) = slot_state.current_y else {
                     return Ok(());
                 };
                 let Some(tracking_id) = slot_state.tracking_id else {
                     return Ok(());
                 };
-                (zone, spec, position, tracking_id)
+                (zone, current_y, tracking_id)
             };
 
-            let slot_state = self.slot_mut(slot)?;
-            let Some(mut anchor) = slot_state.slider_anchor else {
-                slot_state.slider_anchor = Some(position);
+            // 1. Explicit slider specs take priority if configured
+            if let Some(spec) = self.slider_for_zone(zone) {
+                let Some(position) = slider_position(self.caps, spec.axis, self.slot(slot)?) else {
+                    return Ok(());
+                };
+
+                let slot_state = self.slot_mut(slot)?;
+                let Some(mut anchor) = slot_state.slider_anchor else {
+                    slot_state.slider_anchor = Some(position);
+                    return Ok(());
+                };
+
+                if (position - anchor).abs() >= spec.step {
+                    self.flush_pending_tap(output);
+                }
+
+                let slot_state = self.slot_mut(slot)?;
+
+                while position - anchor >= spec.step {
+                    push_slider_step(
+                        slot_state,
+                        output,
+                        SliderStep {
+                            zone,
+                            direction: positive_slider_direction(spec.axis),
+                            slot,
+                            tracking_id,
+                        },
+                    );
+                    anchor += spec.step;
+                }
+
+                while anchor - position >= spec.step {
+                    push_slider_step(
+                        slot_state,
+                        output,
+                        SliderStep {
+                            zone,
+                            direction: negative_slider_direction(spec.axis),
+                            slot,
+                            tracking_id,
+                        },
+                    );
+                    anchor -= spec.step;
+                }
+
+                slot_state.slider_anchor = Some(anchor);
                 return Ok(());
-            };
-
-            if (position - anchor).abs() >= spec.step {
-                self.flush_pending_tap(output);
             }
 
-            let slot_state = self.slot_mut(slot)?;
+            // 2. Otherwise, distance-based rotary encoder mode for vertical edge swipes
+            if self.options.encoder.enabled && matches!(zone, Zone::Left | Zone::Right) {
+                let encoder_config = self.options.encoder;
+                let y_caps = self.caps.y;
+                let slot_state = self.slot_mut(slot)?;
+                if slot_state.encoder.is_none() {
+                    let mut encoder = crate::encoder::EncoderAccumulator::new(
+                        encoder_config,
+                        y_caps,
+                    );
+                    let start_y = slot_state.start_y.unwrap_or(current_y);
+                    encoder.start_contact(zone, slot, tracking_id, start_y);
+                    slot_state.encoder = Some(encoder);
+                }
 
-            // Advance by whole steps, retaining the remainder. Setting the
-            // anchor to the latest position would lose small movements and make
-            // sensitivity depend on the device's event rate.
-            while position - anchor >= spec.step {
-                push_slider_step(
-                    slot_state,
-                    output,
-                    SliderStep {
-                        zone,
-                        direction: positive_slider_direction(spec.axis),
-                        slot,
-                        tracking_id,
-                    },
-                );
-                anchor += spec.step;
+                let ticks = if let Some(ref mut encoder) = slot_state.encoder {
+                    encoder.update(current_y)
+                } else {
+                    Vec::new()
+                };
+
+                if !ticks.is_empty() {
+                    self.flush_pending_tap(output);
+                }
+
+                let slot_state = self.slot_mut(slot)?;
+                for tick in ticks {
+                    push_slider_step(
+                        slot_state,
+                        output,
+                        SliderStep {
+                            zone: tick.zone,
+                            direction: tick.direction,
+                            slot: tick.slot,
+                            tracking_id: tick.tracking_id,
+                        },
+                    );
+                }
+                return Ok(());
             }
 
-            while anchor - position >= spec.step {
-                push_slider_step(
-                    slot_state,
-                    output,
-                    SliderStep {
-                        zone,
-                        direction: negative_slider_direction(spec.axis),
-                        slot,
-                        tracking_id,
-                    },
-                );
-                anchor -= spec.step;
-            }
-
-            slot_state.slider_anchor = Some(anchor);
             Ok(())
         }
 
@@ -1240,6 +1293,18 @@ pub mod core {
                 && options.double_tap_max_distance > 0.0
                 && options.double_tap_max_distance <= 1.0,
             "double-tap distance must be > 0 and <= 1"
+        );
+        assert!(
+            options.encoder.step_size.is_finite() && options.encoder.step_size > 0.0,
+            "encoder step size must be positive"
+        );
+        assert!(
+            options.encoder.dead_zone.is_finite() && options.encoder.dead_zone >= 0.0,
+            "encoder dead zone must be non-negative"
+        );
+        assert!(
+            !options.encoder.repeat_interval.is_zero(),
+            "encoder repeat interval must be positive"
         );
     }
 

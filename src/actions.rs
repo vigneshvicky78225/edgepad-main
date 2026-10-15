@@ -9,7 +9,7 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
     Arc, Mutex,
 };
@@ -25,7 +25,7 @@ use crate::config::{
 use crate::core::SliderAxis;
 use crate::core::{Gesture, GestureDirection, SliderDirection, SliderStep, Zone};
 use crate::ipc::IpcBroadcaster;
-use crate::keyboard::{VirtualKeyboard, DEFAULT_KEY_HOLD_DURATION};
+use crate::keyboard::VirtualKeyboard;
 use crate::proxy::GestureHandler;
 
 const ACTION_COMMAND_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -207,6 +207,7 @@ pub struct ActionDispatcher {
     shutdown: ActionShutdownToken,
     test_mode: Arc<AtomicBool>,
     broadcaster: Option<IpcBroadcaster>,
+    repeat_interval_ms: Arc<AtomicU64>,
 }
 
 impl ActionDispatcher {
@@ -251,6 +252,10 @@ impl ActionDispatcher {
         let worker_test_mode = test_mode.clone();
         let broadcaster = IpcBroadcaster::new();
         let worker_broadcaster = broadcaster.clone();
+        let repeat_interval_ms = Arc::new(AtomicU64::new(
+            crate::encoder::DEFAULT_ENCODER_REPEAT_INTERVAL_MS,
+        ));
+        let worker_repeat_interval_ms = repeat_interval_ms.clone();
 
         let worker = thread::Builder::new()
             .name("edgepad-action-worker".to_string())
@@ -262,6 +267,7 @@ impl ActionDispatcher {
                     worker_shutdown,
                     worker_test_mode,
                     worker_broadcaster,
+                    worker_repeat_interval_ms,
                 )
             })
             .map_err(|err| format!("failed to start edgepad action worker: {err}"))?;
@@ -275,7 +281,20 @@ impl ActionDispatcher {
             shutdown,
             test_mode,
             broadcaster: Some(broadcaster),
+            repeat_interval_ms,
         })
+    }
+
+    pub fn set_repeat_interval_ms(&self, ms: u64) {
+        let clamped = ms.clamp(
+            crate::encoder::MIN_ENCODER_REPEAT_INTERVAL_MS,
+            crate::encoder::MAX_ENCODER_REPEAT_INTERVAL_MS,
+        );
+        self.repeat_interval_ms.store(clamped, Ordering::SeqCst);
+    }
+
+    pub fn repeat_interval_ms(&self) -> u64 {
+        self.repeat_interval_ms.load(Ordering::SeqCst)
     }
 
     pub fn set_test_mode(&self, enabled: bool) {
@@ -363,7 +382,8 @@ impl ActionDispatcher {
     }
 
     pub fn dispatch_slider_step(&mut self, step: SliderStep) {
-        let Some(slider) = self
+        // 1. Check if there is an explicit slider binding configured for this zone & direction
+        if let Some(slider) = self
             .sliders
             .iter()
             .find(|slider| {
@@ -371,34 +391,113 @@ impl ActionDispatcher {
                     && slider.zone == step.zone
                     && slider.direction_is_valid(step.direction)
             })
-        else {
-            self.stats.increment_unmatched_slider_steps();
-            eprintln!("edgepad slider unmatched: {}", slider_step_context(step));
+        {
+            self.stats.increment_matched_slider_steps();
+            match slider.action_for(step.direction) {
+                SliderActionConfig::Command(cmd) => {
+                    self.enqueue_action_command(
+                        ActionSource::SliderStep(step),
+                        ActionPayload::Command(cmd.argv.clone()),
+                    );
+                }
+                SliderActionConfig::Key {
+                    key_code,
+                    key_name,
+                    repeat,
+                } => {
+                    self.enqueue_action_command(
+                        ActionSource::SliderStep(step),
+                        ActionPayload::Key {
+                            key_code: *key_code,
+                            key_name: key_name.clone(),
+                            repeat: *repeat,
+                        },
+                    );
+                }
+            }
             return;
+        }
+
+        // 2. Check if there is a gesture binding configured for this zone & direction
+        let gesture_dir = match step.direction {
+            SliderDirection::Up => GestureDirection::Up,
+            SliderDirection::Down => GestureDirection::Down,
+            SliderDirection::Left => GestureDirection::Left,
+            SliderDirection::Right => GestureDirection::Right,
+        };
+        if let Some(binding) = self
+            .bindings
+            .iter()
+            .find(|b| b.enabled && b.zone == step.zone && b.direction == gesture_dir)
+        {
+            self.stats.increment_matched_slider_steps();
+            match &binding.action {
+                GestureActionConfig::Key {
+                    key_code,
+                    key_name,
+                    ..
+                } => {
+                    self.enqueue_action_command(
+                        ActionSource::SliderStep(step),
+                        ActionPayload::Key {
+                            key_code: *key_code,
+                            key_name: key_name.clone(),
+                            repeat: 1,
+                        },
+                    );
+                }
+                GestureActionConfig::Command { argv } => {
+                    self.enqueue_action_command(
+                        ActionSource::SliderStep(step),
+                        ActionPayload::Command(argv.clone()),
+                    );
+                }
+                GestureActionConfig::Log => {
+                    self.stats.increment_log_actions();
+                    eprintln!(
+                        "edgepad slider action log: zone={} direction={} slot={} tracking_id={}",
+                        zone_name(step.zone),
+                        slider_direction_name(step.direction),
+                        step.slot,
+                        step.tracking_id
+                    );
+                    if let Some(ref bcast) = self.broadcaster {
+                        let json = format!(
+                            r#"{{"event":"slider_step","zone":"{}","direction":"{}","action_type":"log","action":"log","success":true}}"#,
+                            zone_name(step.zone),
+                            slider_direction_name(step.direction)
+                        );
+                        bcast.broadcast(&json);
+                    }
+                }
+            }
+            return;
+        }
+
+        // 3. Fallback to standard hardware defaults:
+        // Left edge: Up -> KEY_BRIGHTNESSUP (225), Down -> KEY_BRIGHTNESSDOWN (224)
+        // Right edge: Up -> KEY_VOLUMEUP (115), Down -> KEY_VOLUMEDOWN (114)
+        let default_key = match (step.zone, step.direction) {
+            (Zone::Left, SliderDirection::Up) => Some((225, "KEY_BRIGHTNESSUP")),
+            (Zone::Left, SliderDirection::Down) => Some((224, "KEY_BRIGHTNESSDOWN")),
+            (Zone::Right, SliderDirection::Up) => Some((115, "KEY_VOLUMEUP")),
+            (Zone::Right, SliderDirection::Down) => Some((114, "KEY_VOLUMEDOWN")),
+            _ => None,
         };
 
-        self.stats.increment_matched_slider_steps();
-        match slider.action_for(step.direction) {
-            SliderActionConfig::Command(cmd) => {
-                self.enqueue_action_command(
-                    ActionSource::SliderStep(step),
-                    ActionPayload::Command(cmd.argv.clone()),
-                );
-            }
-            SliderActionConfig::Key {
-                key_code,
-                key_name,
-                repeat,
-            } => {
-                self.enqueue_action_command(
-                    ActionSource::SliderStep(step),
-                    ActionPayload::Key {
-                        key_code: *key_code,
-                        key_name: key_name.clone(),
-                        repeat: *repeat,
-                    },
-                );
-            }
+        if let Some((code, name)) = default_key {
+            self.stats.increment_matched_slider_steps();
+            self.enqueue_action_command(
+                ActionSource::SliderStep(step),
+                ActionPayload::Key {
+                    key_code: code,
+                    key_name: name.to_string(),
+                    repeat: 1,
+                },
+            );
+        } else {
+            self.stats.increment_unmatched_slider_steps();
+            eprintln!("edgepad slider unmatched: {}", slider_step_context(step));
         }
     }
 
@@ -490,6 +589,7 @@ fn run_action_worker<R>(
     shutdown: ActionShutdownToken,
     test_mode: Arc<AtomicBool>,
     broadcaster: IpcBroadcaster,
+    repeat_interval_ms: Arc<AtomicU64>,
 ) where
     R: ActionCommandRunner,
 {
@@ -587,16 +687,25 @@ fn run_action_worker<R>(
                         }
                     }
 
+                    let interval = repeat_interval_ms.load(Ordering::SeqCst);
+                    let hold_ms = (interval / 2).max(4);
+                    let pause_ms = interval.saturating_sub(hold_ms).max(4);
+                    let hold_dur = Duration::from_millis(hold_ms);
+                    let pause_dur = Duration::from_millis(pause_ms);
+
                     let success = if let Some(ref mut kb) = keyboard {
                         let mut ok = true;
-                        for _ in 0..*repeat {
-                            if let Err(err) = kb.tap(*key_code, DEFAULT_KEY_HOLD_DURATION) {
+                        for i in 0..*repeat {
+                            if let Err(err) = kb.tap(*key_code, hold_dur) {
                                 eprintln!(
                                     "edgepad failed to emit key {} ({}): {err}",
                                     key_name, key_code
                                 );
                                 ok = false;
                                 break;
+                            }
+                            if i + 1 < *repeat || !pause_dur.is_zero() {
+                                thread::sleep(pause_dur);
                             }
                         }
                         if ok {
@@ -1096,6 +1205,89 @@ mod tests {
             slider_step_context(slider_step(Zone::Right, SliderDirection::Up)),
             "zone=right direction=up slot=0 tracking_id=42"
         );
+    }
+
+    #[test]
+    fn slider_step_selects_correct_hardware_default_keys() {
+        let mut dispatcher = ActionDispatcher::with_runner(
+            Vec::new(),
+            16,
+            ProcessCommandRunner,
+        )
+        .expect("dispatcher should start");
+        dispatcher.set_test_mode(true);
+
+        // Test fallback hardware defaults when no explicit bindings are configured:
+        // Left Up -> KEY_BRIGHTNESSUP (225)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Left, SliderDirection::Up));
+        // Left Down -> KEY_BRIGHTNESSDOWN (224)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Left, SliderDirection::Down));
+        // Right Up -> KEY_VOLUMEUP (115)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Right, SliderDirection::Up));
+        // Right Down -> KEY_VOLUMEDOWN (114)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Right, SliderDirection::Down));
+
+        // Sleep briefly to let the test worker process the 4 commands
+        thread::sleep(Duration::from_millis(50));
+        let stats = dispatcher.shutdown();
+
+        assert_eq!(stats.matched_slider_steps, 4);
+        assert_eq!(stats.started_commands, 4);
+        assert_eq!(stats.succeeded_commands, 4);
+    }
+
+    #[test]
+    fn slider_step_honors_gesture_binding_if_configured() {
+        let mut dispatcher = ActionDispatcher::with_runner(
+            vec![
+                binding(
+                    Zone::Left,
+                    GestureDirection::Up,
+                    GestureActionConfig::Key {
+                        key_code: 104,
+                        key_name: "KEY_PAGEUP".to_string(),
+                        repeat: 1,
+                    },
+                ),
+            ],
+            16,
+            ProcessCommandRunner,
+        )
+        .expect("dispatcher should start");
+        dispatcher.set_test_mode(true);
+
+        dispatcher.dispatch_slider_step(slider_step(Zone::Left, SliderDirection::Up));
+        thread::sleep(Duration::from_millis(30));
+        let stats = dispatcher.shutdown();
+
+        assert_eq!(stats.matched_slider_steps, 1);
+        assert_eq!(stats.started_commands, 1);
+        assert_eq!(stats.succeeded_commands, 1);
+    }
+
+    #[test]
+    fn rapid_slider_ticks_do_not_block_and_complete_independently() {
+        let mut dispatcher = ActionDispatcher::with_runner(
+            Vec::new(),
+            32,
+            ProcessCommandRunner,
+        )
+        .expect("dispatcher should start");
+        dispatcher.set_test_mode(true);
+        dispatcher.set_repeat_interval_ms(10);
+
+        // Rapid burst of 10 ticks (e.g. fast continuous swipe)
+        for _ in 0..10 {
+            dispatcher.dispatch_slider_step(slider_step(Zone::Right, SliderDirection::Up));
+        }
+
+        thread::sleep(Duration::from_millis(80));
+        let stats = dispatcher.shutdown();
+
+        assert_eq!(stats.matched_slider_steps, 10);
+        assert_eq!(stats.started_commands, 10);
+        assert_eq!(stats.succeeded_commands, 10);
+        assert_eq!(stats.failed_commands, 0);
     }
 
     fn wait_for_started_command(dispatcher: &ActionDispatcher) {

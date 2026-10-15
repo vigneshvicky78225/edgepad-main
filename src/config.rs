@@ -39,6 +39,7 @@ pub struct EdgepadConfig {
     pub double_tap_timeout_ms: u64,
     pub double_tap_max_distance: f32,
     pub swipe_min_distance: f32,
+    pub encoder: crate::encoder::EncoderConfig,
     pub gestures: Vec<GestureBindingConfig>,
     pub sliders: Vec<SliderBindingConfig>,
 }
@@ -62,6 +63,7 @@ impl Default for EdgepadConfig {
             double_tap_timeout_ms: DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
             double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
+            encoder: crate::encoder::EncoderConfig::default(),
             gestures: Vec::new(),
             sliders: Vec::new(),
         }
@@ -113,6 +115,19 @@ impl EdgepadConfig {
         if let Some(swipe_min_distance) = raw.swipe_min_distance {
             config.swipe_min_distance =
                 validate_swipe_min_distance(swipe_min_distance, "swipe_min_distance")?;
+        }
+        if let Some(raw_encoder) = raw.encoder {
+            config.encoder.enabled = raw_encoder.enabled.unwrap_or(true);
+            if let Some(step) = raw_encoder.step_size {
+                config.encoder.step_size = step;
+            }
+            if let Some(dead_zone) = raw_encoder.dead_zone {
+                config.encoder.dead_zone = dead_zone;
+            }
+            if let Some(repeat_ms) = raw_encoder.repeat_interval_ms {
+                config.encoder.repeat_interval = Duration::from_millis(repeat_ms);
+            }
+            config.encoder.sanitize();
         }
 
         for (index, raw_binding) in raw.gestures.into_iter().enumerate() {
@@ -189,6 +204,12 @@ impl EdgepadConfig {
             double_tap_timeout_ms: Some(self.double_tap_timeout_ms),
             double_tap_max_distance: Some(self.double_tap_max_distance),
             swipe_min_distance: Some(self.swipe_min_distance),
+            encoder: Some(RawEncoderConfig {
+                enabled: Some(self.encoder.enabled),
+                step_size: Some(self.encoder.step_size),
+                dead_zone: Some(self.encoder.dead_zone),
+                repeat_interval_ms: Some(self.encoder.repeat_interval.as_millis() as u64),
+            }),
             gestures: self.gestures.iter().map(|g| g.to_raw()).collect(),
             sliders: self.sliders.iter().map(|s| s.to_raw()).collect(),
         }
@@ -204,6 +225,7 @@ impl EdgepadConfig {
             double_tap_timeout_ms: DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
             double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
             swipe_min_distance: 0.08,
+            encoder: crate::encoder::EncoderConfig::default(),
             gestures: vec![
                 GestureBindingConfig {
                     zone: Zone::Left,
@@ -291,6 +313,7 @@ impl EdgepadConfig {
                 (binding.enabled && binding.direction == GestureDirection::Tap)
                     .then_some(binding.zone)
             })),
+            encoder: self.encoder,
         }
     }
 
@@ -940,7 +963,6 @@ fn slider_label(index: usize) -> String {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct RawEdgepadConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
@@ -964,15 +986,29 @@ pub struct RawEdgepadConfig {
     pub double_tap_max_distance: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swipe_min_distance: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<RawEncoderConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gestures: Vec<RawGestureBindingConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sliders: Vec<RawSliderBindingConfig>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+pub struct RawEncoderConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_zone: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_interval_ms: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct RawGestureBindingConfig {
+    #[serde(alias = "edge")]
     pub zone: String,
     pub direction: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -998,8 +1034,8 @@ pub enum RawGestureActionConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct RawSliderBindingConfig {
+    #[serde(alias = "edge")]
     pub zone: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<f32>,
