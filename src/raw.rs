@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::core::{
-    AxisRange, Capabilities, Engine, Event, Gesture, ResyncContact, SliderStep, SlotError,
+    AxisRange, Capabilities, Engine, Event, Gesture, GestureCancellation, ResyncContact,
+    SliderStep, SlotError,
 };
 
 pub const EV_SYN: u16 = 0x00;
@@ -193,6 +194,7 @@ pub struct RoutedRawFrame {
     pub physical_buttons: Vec<RawEvent>,
     pub gestures: Vec<Gesture>,
     pub slider_steps: Vec<SliderStep>,
+    pub cancellations: Vec<GestureCancellation>,
     pub resync_required: bool,
 }
 
@@ -885,6 +887,7 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
         physical_buttons,
         gestures: canceled_tap_gestures,
         slider_steps: output.slider_steps,
+        cancellations: output.cancellations,
         resync_required: output.resync_required,
     })
 }
@@ -896,6 +899,7 @@ pub fn route_recognition_deadline(engine: &mut Engine, timestamp: Duration) -> R
         physical_buttons: Vec::new(),
         gestures: output.gestures,
         slider_steps: Vec::new(),
+        cancellations: output.cancellations,
         resync_required: false,
     }
 }
@@ -914,6 +918,7 @@ pub fn route_resync_contacts(
         physical_buttons: Vec::new(),
         gestures: Vec::new(),
         slider_steps: Vec::new(),
+        cancellations: Vec::new(),
         resync_required: false,
     })
 }

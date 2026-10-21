@@ -178,12 +178,16 @@ fn wait_for_fd_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
 }
 
 fn poll_timeout_ms(timeout: Duration) -> i32 {
-    let millis = timeout.as_millis();
-    if millis == 0 {
-        0
-    } else {
-        millis.min(i32::MAX as u128) as i32
+    if timeout.is_zero() {
+        return 0;
     }
+    let millis = timeout.as_millis();
+    let millis = if timeout.subsec_nanos() > 0 {
+        millis.saturating_add(1)
+    } else {
+        millis
+    };
+    millis.min(i32::MAX as u128) as i32
 }
 
 pub fn touchpad_candidates(summaries: &[DeviceSummary]) -> Vec<&DeviceSummary> {

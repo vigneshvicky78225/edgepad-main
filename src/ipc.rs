@@ -21,7 +21,9 @@ pub const DEFAULT_SOCKET_NAME: &str = "edgepad.sock";
 /// Returns the standard Unix socket path for Edgepad.
 pub fn default_ipc_socket_path() -> PathBuf {
     if let Some(runtime_dir) = env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
-        PathBuf::from(runtime_dir).join("edgepad").join(DEFAULT_SOCKET_NAME)
+        PathBuf::from(runtime_dir)
+            .join("edgepad")
+            .join(DEFAULT_SOCKET_NAME)
     } else {
         let uid = unsafe { libc::getuid() };
         PathBuf::from(format!("/tmp/edgepad-{uid}")).join(DEFAULT_SOCKET_NAME)

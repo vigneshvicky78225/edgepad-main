@@ -142,10 +142,10 @@ Options:
 Signals:
       SIGHUP                      Reload config after active contacts lift
 ";
-const DOCTOR_USAGE: &str = "usage: edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]";
+const DOCTOR_USAGE: &str = "usage: edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] [--repair]";
 const DOCTOR_HELP: &str = "\
 Usage:
-  edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]
+  edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] [--repair]
 
 Options:
       --config <file>             TOML config path
@@ -154,6 +154,7 @@ Options:
       --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
       --uinput <path>             uinput device path [default: /dev/uinput]
       --service <unit>            systemd user unit to inspect [default: edgepad.service]
+      --repair                    Repair legacy user service overrides and restart service
 ";
 const STATUS_USAGE: &str = "usage: edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>]";
 const STATUS_HELP: &str = "\
@@ -464,6 +465,9 @@ fn parse_doctor_args(mut args: impl Iterator<Item = String>) -> Result<DoctorCon
             "--service" => {
                 config.service_name = args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?;
             }
+            "--repair" => {
+                config.repair = true;
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown doctor option {other}"));
             }
@@ -697,7 +701,7 @@ fn load_daemon_config(path: &Path) -> Result<EdgepadConfig, String> {
         }
         Ok(_) => load_edgepad_config(path),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(format!(
-            "daemon config not found: {}; pass --config <file> or create it from edgepad.toml.example",
+            "daemon config not found: {}; pass --config <file> or create it from /usr/share/edgepad/edgepad.toml",
             path.display()
         )),
         Err(err) => Err(format!(
@@ -823,6 +827,20 @@ fn devices(root: &Path, show_all: bool) -> Result<(), String> {
 }
 
 fn doctor(config: &DoctorConfig) -> Result<i32, String> {
+    if config.repair {
+        println!("edgepad doctor: repairing installation and service state...");
+        match edgepad::doctor::repair_service(&config.service_name) {
+            Ok(actions) => {
+                for act in actions {
+                    println!("  ✓ {act}");
+                }
+            }
+            Err(e) => {
+                eprintln!("  ✗ Repair error: {e}");
+            }
+        }
+        println!();
+    }
     let report = run_doctor(config);
     print_doctor_report(&report);
     if report.has_failures() {
@@ -1295,22 +1313,23 @@ fn gui(args: &[String]) -> Result<(), String> {
         }
     }
 
+    if let Ok(home) = env::var("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/share/edgepad/gui/main.py"));
+    }
+
     candidates.push(PathBuf::from("/usr/share/edgepad/gui/main.py"));
     candidates.push(PathBuf::from("/usr/local/share/edgepad/gui/main.py"));
 
-    let script = candidates
-        .iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| {
-            format!(
-                "could not find edgepad GUI entry point (checked: {})",
-                candidates
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+    let script = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
+        format!(
+            "could not find edgepad GUI entry point (checked: {})",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
 
     let status = process::Command::new("python3")
         .arg(script)
@@ -1875,6 +1894,10 @@ fn zone_name(zone: Zone) -> &'static str {
         Zone::Right => "right",
         Zone::Top => "top",
         Zone::Bottom => "bottom",
+        Zone::TopLeft => "top-left",
+        Zone::TopRight => "top-right",
+        Zone::BottomLeft => "bottom-left",
+        Zone::BottomRight => "bottom-right",
     }
 }
 
@@ -1961,6 +1984,7 @@ mod tests {
         assert_eq!(args.input_root, PathBuf::from("/dev/input"));
         assert_eq!(args.uinput_path, PathBuf::from("/dev/uinput"));
         assert_eq!(args.service_name, "edgepad.service");
+        assert!(!args.repair);
     }
 
     #[test]
@@ -1977,6 +2001,7 @@ mod tests {
                 "/tmp/uinput",
                 "--service",
                 "custom-edgepad.service",
+                "--repair",
             ]
             .into_iter()
             .map(String::from),
@@ -1991,6 +2016,7 @@ mod tests {
         assert_eq!(args.input_root, PathBuf::from("/tmp/input"));
         assert_eq!(args.uinput_path, PathBuf::from("/tmp/uinput"));
         assert_eq!(args.service_name, "custom-edgepad.service");
+        assert!(args.repair);
     }
 
     #[test]

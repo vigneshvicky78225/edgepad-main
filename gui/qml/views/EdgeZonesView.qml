@@ -77,12 +77,16 @@ ScrollView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         edgeWidthFraction: edgeWidthSlider.value / 100.0
+                        maxDriftFraction: maxDriftSlider.value / (edgepadController.selectedDeviceDetails.x_max || 2905.0)
+                        maxDriftUnits: maxDriftSlider.value
+                        showDriftCorridor: true
                         xMax: edgepadController.selectedDeviceDetails.x_max || 2905
                         yMax: edgepadController.selectedDeviceDetails.y_max || 1766
                     }
 
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: 8
                         Text {
                             text: "Active Width: " + edgeWidthSlider.value + "% per side"
                             color: "#3daee9"
@@ -90,9 +94,16 @@ ScrollView {
                             font.pixelSize: 11
                             Layout.fillWidth: true
                         }
+                        Rectangle {
+                            width: 8
+                            height: 8
+                            radius: 2
+                            color: "#f39c12"
+                        }
                         Text {
-                            text: "Center Area: " + (100 - edgeWidthSlider.value * 2) + "% width"
-                            color: "#95a5a6"
+                            text: "Max Drift: " + maxDriftSlider.value + " units (" + (Math.round((maxDriftSlider.value / (edgepadController.selectedDeviceDetails.x_max || 2905.0)) * 1000) / 10) + "%)"
+                            color: "#f39c12"
+                            font.bold: true
                             font.pixelSize: 11
                         }
                     }
@@ -147,7 +158,12 @@ ScrollView {
                         RowLayout {
                             Layout.fillWidth: true
                             Text { text: "Minimum Swipe Distance:"; color: "#ecf0f1"; font.pixelSize: 12; Layout.fillWidth: true }
-                            Text { text: minTravelSlider.value + " units"; color: "#3daee9"; font.bold: true; font.pixelSize: 12 }
+                            Text {
+                                text: minTravelSlider.value + " units (" + (Math.round((minTravelSlider.value / (edgepadController.selectedDeviceDetails.x_max || 2905.0)) * 1000) / 10) + "%)"
+                                color: "#3daee9"
+                                font.bold: true
+                                font.pixelSize: 12
+                            }
                         }
                         Slider {
                             id: minTravelSlider
@@ -167,7 +183,12 @@ ScrollView {
                         RowLayout {
                             Layout.fillWidth: true
                             Text { text: "Maximum Horizontal Drift:"; color: "#ecf0f1"; font.pixelSize: 12; Layout.fillWidth: true }
-                            Text { text: maxDriftSlider.value + " units"; color: "#3daee9"; font.bold: true; font.pixelSize: 12 }
+                            Text {
+                                text: maxDriftSlider.value + " units (" + (Math.round((maxDriftSlider.value / (edgepadController.selectedDeviceDetails.x_max || 2905.0)) * 1000) / 10) + "%)"
+                                color: "#f39c12"
+                                font.bold: true
+                                font.pixelSize: 12
+                            }
                         }
                         Slider {
                             id: maxDriftSlider
@@ -177,6 +198,13 @@ ScrollView {
                             stepSize: 10
                             value: edgepadController.edgeSettings.max_drift || 120
                             onMoved: saveSettings()
+                        }
+                        Text {
+                            text: "Swipes with inward drift exceeding this limit are filtered out to prevent false triggers."
+                            color: "#95a5a6"
+                            font.pixelSize: 10
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
                         }
                     }
 

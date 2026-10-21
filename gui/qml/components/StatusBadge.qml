@@ -21,12 +21,12 @@ Rectangle {
 
     readonly property string statusText: {
         switch (root.status) {
-            case "running": return "Active & Running";
+            case "running": return "Active";
             case "starting": return "Starting...";
-            case "error": return "Error / Failed";
-            case "not_installed": return "Service Not Installed";
+            case "error": return "Error";
+            case "not_installed": return "Not Installed";
             case "stopped":
-            default: return "Service Stopped";
+            default: return "Stopped";
         }
     }
 

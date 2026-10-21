@@ -22,15 +22,20 @@ class DiagnosticsManager:
         self.edgepad_bin = edgepad_bin or self._find_edgepad_bin()
 
     def _find_edgepad_bin(self) -> str:
+        usr_bin = Path("/usr/bin/edgepad")
+        if usr_bin.exists() and os.access(usr_bin, os.X_OK):
+            return str(usr_bin)
         which = shutil.which("edgepad")
         if which:
             return which
-        ws = Path("/home/vicky/Downloads/linux-projects/edgepad-main/target/debug/edgepad")
-        if ws.exists():
-            return str(ws)
         local_bin = Path.home() / ".local" / "bin" / "edgepad"
-        if local_bin.exists():
+        if local_bin.exists() and os.access(local_bin, os.X_OK):
             return str(local_bin)
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        for sub in ["release", "debug"]:
+            target_bin = repo_root / "target" / sub / "edgepad"
+            if target_bin.exists() and os.access(target_bin, os.X_OK):
+                return str(target_bin)
         return "edgepad"
 
     def run_doctor(self, config_path: str | None = None) -> dict[str, Any]:

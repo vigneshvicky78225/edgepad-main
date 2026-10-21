@@ -292,13 +292,20 @@ fn actions_status_line(config: &EdgepadConfig) -> StatusLine {
         .filter_map(|binding| match &binding.action {
             crate::config::GestureActionConfig::Command { argv } => argv.first(),
             crate::config::GestureActionConfig::Log => None,
-            crate::config::GestureActionConfig::Key { .. } => None,
+            crate::config::GestureActionConfig::Key { .. }
+            | crate::config::GestureActionConfig::KeyCombo { .. } => None,
         })
         .collect::<BTreeSet<_>>();
     let mut key_count = config
         .gestures
         .iter()
-        .filter(|b| matches!(b.action, crate::config::GestureActionConfig::Key { .. }))
+        .filter(|b| {
+            matches!(
+                b.action,
+                crate::config::GestureActionConfig::Key { .. }
+                    | crate::config::GestureActionConfig::KeyCombo { .. }
+            )
+        })
         .count();
     for slider in &config.sliders {
         if let Some(argv) = slider.negative.argv() {
@@ -495,6 +502,10 @@ fn zone_name(zone: Zone) -> &'static str {
         Zone::Right => "right",
         Zone::Top => "top",
         Zone::Bottom => "bottom",
+        Zone::TopLeft => "top-left",
+        Zone::TopRight => "top-right",
+        Zone::BottomLeft => "bottom-left",
+        Zone::BottomRight => "bottom-right",
     }
 }
 

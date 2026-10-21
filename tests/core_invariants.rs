@@ -77,7 +77,7 @@ fn claimed_edge_touch_does_not_emit_initial_down_to_passthrough() {
     assert!(down.gestures.is_empty());
 
     let move_frame = engine
-        .process_frame(&[Event::slot(0), Event::x(220), Event::y(310)])
+        .process_frame(&[Event::slot(0), Event::x(80), Event::y(310)])
         .expect("claimed movement remains internal");
     assert_eq!(move_frame.passthrough, Vec::<Event>::new());
 
@@ -608,7 +608,7 @@ fn short_edge_swipe_still_emits_directional_gesture() {
         .expect("left edge contact is valid");
     engine
         .process_frame_at(
-            &[Event::slot(0), Event::x(220), Event::y(310)],
+            &[Event::slot(0), Event::x(80), Event::y(310)],
             Duration::from_millis(1030),
         )
         .expect("claimed movement remains internal");
@@ -816,7 +816,7 @@ fn gesture_direction_compares_normalized_axis_travel() {
         ])
         .expect("contact should start");
     engine
-        .process_frame(&[Event::slot(0), Event::x(220), Event::y(650)])
+        .process_frame(&[Event::slot(0), Event::x(180), Event::y(650)])
         .expect("contact should move");
     let released = engine
         .process_frame(&[Event::slot(0), Event::tracking_id(-1)])

@@ -307,8 +307,14 @@ else
     run install -Dm0644 "${tmp_dir}/edgepad.toml.example" "$CONFIG_FILE"
 fi
 
+# If binary was installed to user BIN_DIR and /usr/bin/edgepad does not exist, adapt unit ExecStart
+if [ ! -x "/usr/bin/edgepad" ] || [ "${BIN_DIR}/edgepad" != "/usr/bin/edgepad" ]; then
+    sed -i "s|ExecStart=/usr/bin/edgepad|ExecStart=${BIN_DIR}/edgepad|g" "${tmp_dir}/edgepad.service"
+fi
+
 run install -Dm0644 "${tmp_dir}/edgepad.service" "$SERVICE_FILE"
 run systemctl --user daemon-reload
+run_optional systemctl --user reset-failed edgepad.service
 run systemctl --user enable edgepad.service
 run systemctl --user restart edgepad.service
 run systemctl --user is-active --quiet edgepad.service

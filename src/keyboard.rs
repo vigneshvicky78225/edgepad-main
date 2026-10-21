@@ -3,9 +3,7 @@
 //! Emits key press and release events via /dev/uinput.
 //! Guarantees that held keys are released on shutdown or drop.
 
-use evdev::{
-    uinput::VirtualDevice, AttributeSet, EventType, InputEvent, KeyCode,
-};
+use evdev::{uinput::VirtualDevice, AttributeSet, EventType, InputEvent, KeyCode};
 use std::collections::HashSet;
 use std::io;
 use std::thread;
@@ -73,6 +71,29 @@ impl VirtualKeyboard {
         Ok(())
     }
 
+    /// Emit a sequence of keys as a key combination:
+    /// Press keys in forward order (e.g. Ctrl -> Shift -> M), hold briefly, then release in reverse order (M -> Shift -> Ctrl).
+    pub fn emit_combo(&mut self, key_codes: &[u16], hold_duration: Duration) -> io::Result<()> {
+        if key_codes.is_empty() {
+            return Ok(());
+        }
+        for &code in key_codes {
+            if let Err(err) = self.press(code) {
+                let _ = self.release_all();
+                return Err(err);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        if !hold_duration.is_zero() {
+            thread::sleep(hold_duration);
+        }
+        for &code in key_codes.iter().rev() {
+            let _ = self.release(code);
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
     /// Release all currently held keys.
     pub fn release_all(&mut self) -> io::Result<()> {
         let keys_to_release: Vec<u16> = self.held_keys.drain().collect();
@@ -108,7 +129,9 @@ pub fn parse_key_code(raw: &str) -> Result<u16, String> {
         if code > 0 && code <= 0x2ff {
             return Ok(code);
         }
-        return Err(format!("numeric key code {code} out of valid range (1..=767)"));
+        return Err(format!(
+            "numeric key code {code} out of valid range (1..=767)"
+        ));
     }
 
     let upper = trimmed.to_ascii_uppercase();
@@ -154,7 +177,6 @@ pub const KNOWN_KEYS: &[(&str, u16, &str)] = &[
     ("KEY_KBDILLUMDOWN", 229, "Keyboard Backlight Down"),
     ("KEY_KBDILLUMTOGGLE", 228, "Keyboard Backlight Toggle"),
     ("KEY_DISPLAYTOGGLE", 175, "Display Toggle"),
-
     // Audio & Media
     ("KEY_VOLUMEUP", 115, "Volume Up"),
     ("KEY_VOLUMEDOWN", 114, "Volume Down"),
@@ -168,13 +190,11 @@ pub const KNOWN_KEYS: &[(&str, u16, &str)] = &[
     ("KEY_PREVIOUSSONG", 165, "Previous Track"),
     ("KEY_FASTFORWARD", 208, "Fast Forward"),
     ("KEY_REWIND", 168, "Rewind"),
-
     // System & Power
     ("KEY_POWER", 116, "Power Button"),
     ("KEY_SLEEP", 142, "Sleep / Suspend"),
     ("KEY_WAKEUP", 143, "Wakeup"),
     ("KEY_RESTART", 0x198, "Restart"),
-
     // Navigation & Common Controls
     ("KEY_ESC", 1, "Escape"),
     ("KEY_ENTER", 28, "Enter / Return"),
@@ -191,7 +211,6 @@ pub const KNOWN_KEYS: &[(&str, u16, &str)] = &[
     ("KEY_DOWN", 108, "Down Arrow"),
     ("KEY_LEFT", 105, "Left Arrow"),
     ("KEY_RIGHT", 106, "Right Arrow"),
-
     // Modifiers & Meta
     ("KEY_LEFTCTRL", 29, "Left Control"),
     ("KEY_RIGHTCTRL", 97, "Right Control"),
@@ -203,7 +222,6 @@ pub const KNOWN_KEYS: &[(&str, u16, &str)] = &[
     ("KEY_RIGHTMETA", 126, "Right Meta"),
     ("KEY_CAPSLOCK", 58, "Caps Lock"),
     ("KEY_PRINT", 210, "Print Screen"),
-
     // Function Keys
     ("KEY_F1", 59, "F1"),
     ("KEY_F2", 60, "F2"),
@@ -217,7 +235,6 @@ pub const KNOWN_KEYS: &[(&str, u16, &str)] = &[
     ("KEY_F10", 68, "F10"),
     ("KEY_F11", 87, "F11"),
     ("KEY_F12", 88, "F12"),
-
     // Alphabet
     ("KEY_A", 30, "A"),
     ("KEY_B", 48, "B"),
@@ -245,7 +262,6 @@ pub const KNOWN_KEYS: &[(&str, u16, &str)] = &[
     ("KEY_X", 45, "X"),
     ("KEY_Y", 21, "Y"),
     ("KEY_Z", 44, "Z"),
-
     // Numbers
     ("KEY_1", 2, "1"),
     ("KEY_2", 3, "2"),

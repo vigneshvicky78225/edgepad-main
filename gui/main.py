@@ -8,15 +8,29 @@ system tray icon, and background service management.
 from __future__ import annotations
 
 import os
+import shutil
 import signal
+import subprocess
 import sys
 from pathlib import Path
+
+# Disable stale QML disk bytecode caching across builds and updates
+os.environ["QML_DISABLE_DISK_CACHE"] = "1"
+
+# Invalidate any lingering legacy on-disk QML bytecode caches
+for _cache_name in ("Edgepad", "edgepad", "PySideApp"):
+    _cache_dir = Path.home() / ".cache" / _cache_name / "qmlcache"
+    if _cache_dir.is_dir():
+        try:
+            shutil.rmtree(_cache_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 # Enable Ctrl+C to terminate cleanly
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-from PySide6.QtCore import QCoreApplication, QUrl
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QUrl
+from PySide6.QtGui import QIcon, QKeyEvent, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
@@ -139,9 +153,46 @@ def main() -> int:
 
     main_window = engine.rootObjects()[0]
     tray = create_tray_icon(app, main_window, controller)
+    if tray is not None:
+        app.setQuitOnLastWindowClosed(False)
 
-    return app.exec()
+    main_window.show()
+    main_window.raise_()
+    main_window.requestActivate()
+
+    def set_kwin_global_shortcuts_blocked(blocked: bool) -> None:
+        """Asks KDE Plasma KGlobalAccel to temporarily block global shortcuts (like Alt+Tab) during recording."""
+        try:
+            val = "true" if blocked else "false"
+            # qdbus-qt6 handles KWin global shortcut inhibition safely without Shiboken binding teardown issues
+            subprocess.run(
+                ["qdbus-qt6", "org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel.blockGlobalShortcuts", val],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.0,
+            )
+        except Exception:
+            pass
+
+    def on_recording_state_changed(active: bool) -> None:
+        try:
+            main_window.setKeyboardGrabEnabled(active)
+        except Exception:
+            pass
+        set_kwin_global_shortcuts_blocked(active)
+
+    controller.recordingActiveChanged.connect(on_recording_state_changed)
+
+    try:
+        ret = app.exec()
+    finally:
+        set_kwin_global_shortcuts_blocked(False)
+        try:
+            controller.ipc_client.stop()
+        except Exception:
+            pass
+    return ret
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    os._exit(main())

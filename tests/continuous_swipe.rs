@@ -148,7 +148,10 @@ fn movement_spread_across_many_small_input_events_accumulates_correctly() {
     }
 
     // Frame 10 (reaches 50 units): exactly 1 tick emitted
-    assert_eq!(emitted_ticks[9], 1, "accumulated 50 units must trigger 1 tick");
+    assert_eq!(
+        emitted_ticks[9], 1,
+        "accumulated 50 units must trigger 1 tick"
+    );
 }
 
 #[test]
@@ -171,7 +174,10 @@ fn slow_and_fast_swipes_behave_appropriately() {
             .unwrap();
         slow_steps += out.slider_steps.len();
     }
-    assert_eq!(slow_steps, 2, "slow swipe of 100 units with step 50 must produce 2 steps");
+    assert_eq!(
+        slow_steps, 2,
+        "slow swipe of 100 units with step 50 must produce 2 steps"
+    );
 
     // 2. Fast swipe: 250 units in a single frame
     let mut engine_fast = test_engine(50.0, 0.0);
@@ -286,7 +292,11 @@ fn stationary_touches_do_not_trigger_repeated_adjustments() {
         let out = engine
             .process_frame(&[Event::slot(0), Event::y(500)])
             .unwrap();
-        assert_eq!(out.slider_steps.len(), 0, "stationary touches must never emit ticks");
+        assert_eq!(
+            out.slider_steps.len(),
+            0,
+            "stationary touches must never emit ticks"
+        );
     }
 }
 
@@ -309,7 +319,11 @@ fn jitter_is_filtered() {
         let out = engine
             .process_frame(&[Event::slot(0), Event::y(jitter_y)])
             .unwrap();
-        assert_eq!(out.slider_steps.len(), 0, "dead zone must absorb sensor jitter");
+        assert_eq!(
+            out.slider_steps.len(),
+            0,
+            "dead zone must absorb sensor jitter"
+        );
     }
 }
 
@@ -378,13 +392,19 @@ fn normal_pointer_and_scroll_forwarding_remain_functional() {
     ];
     let out1 = engine.process_frame(&f1).unwrap();
     assert_eq!(out1.slider_steps.len(), 0);
-    assert!(!out1.passthrough.is_empty(), "center pointer touch must pass through");
+    assert!(
+        !out1.passthrough.is_empty(),
+        "center pointer touch must pass through"
+    );
 
     // Center movement
     let f2 = [Event::slot(0), Event::x(1020), Event::y(530)];
     let out2 = engine.process_frame(&f2).unwrap();
     assert_eq!(out2.slider_steps.len(), 0);
-    assert!(!out2.passthrough.is_empty(), "center pointer motion must pass through");
+    assert!(
+        !out2.passthrough.is_empty(),
+        "center pointer motion must pass through"
+    );
 
     // 2. Second finger down in center (e.g. for two-finger scroll)
     let f3 = [
@@ -395,16 +415,127 @@ fn normal_pointer_and_scroll_forwarding_remain_functional() {
     ];
     let out3 = engine.process_frame(&f3).unwrap();
     assert_eq!(out3.slider_steps.len(), 0);
-    assert!(!out3.passthrough.is_empty(), "multitouch scroll finger must pass through");
+    assert!(
+        !out3.passthrough.is_empty(),
+        "multitouch scroll finger must pass through"
+    );
 
     // Two finger scroll motion
-    let f4 = [
-        Event::slot(0),
-        Event::y(560),
-        Event::slot(1),
-        Event::y(550),
-    ];
+    let f4 = [Event::slot(0), Event::y(560), Event::slot(1), Event::y(550)];
     let out4 = engine.process_frame(&f4).unwrap();
     assert_eq!(out4.slider_steps.len(), 0);
-    assert!(!out4.passthrough.is_empty(), "scroll motion must pass through");
+    assert!(
+        !out4.passthrough.is_empty(),
+        "scroll motion must pass through"
+    );
+}
+
+#[test]
+fn top_edge_horizontal_rotary_encoder_emits_right_and_left_steps() {
+    let mut engine = test_engine(50.0, 0.0);
+    let mut dispatcher = ActionDispatcher::new(Vec::new(), 64).unwrap();
+    dispatcher.set_test_mode(true);
+
+    // Initial touch on top edge (x=500, y=50) -> inside top 10% hitbox [0..100]
+    let f1 = [
+        Event::slot(0),
+        Event::tracking_id(50),
+        Event::x(500),
+        Event::y(50),
+    ];
+    let out1 = engine.process_frame(&f1).unwrap();
+    assert_eq!(out1.slider_steps.len(), 0);
+
+    // Continuous swipe moving RIGHT by 150 units (x=500 -> 650)
+    let mut right_steps = 0;
+    for x in (550..=650).step_by(50) {
+        let frame = [Event::slot(0), Event::x(x)];
+        let out = engine.process_frame(&frame).unwrap();
+        for step in out.slider_steps {
+            assert_eq!(step.zone, Zone::Top);
+            assert_eq!(step.direction, SliderDirection::Right);
+            dispatcher.dispatch_slider_step(step);
+            right_steps += 1;
+        }
+    }
+    assert_eq!(right_steps, 3);
+
+    // Reverse direction: swipe LEFT by 100 units (x=650 -> 550)
+    let mut left_steps = 0;
+    for x in (550..=600).rev().step_by(50) {
+        let frame = [Event::slot(0), Event::x(x)];
+        let out = engine.process_frame(&frame).unwrap();
+        for step in out.slider_steps {
+            assert_eq!(step.zone, Zone::Top);
+            assert_eq!(step.direction, SliderDirection::Left);
+            dispatcher.dispatch_slider_step(step);
+            left_steps += 1;
+        }
+    }
+    assert_eq!(left_steps, 2);
+
+    // Lift finger: must clean up without emitting duplicate one-shot swipe gestures
+    let out_lift = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .unwrap();
+    assert!(out_lift.slider_steps.is_empty());
+    assert!(out_lift.gestures.is_empty());
+
+    let stats = dispatcher.stats();
+    assert_eq!(stats.matched_slider_steps, 5);
+}
+
+#[test]
+fn bottom_edge_horizontal_rotary_encoder_emits_right_and_left_steps() {
+    let mut engine = test_engine(50.0, 0.0);
+    let mut dispatcher = ActionDispatcher::new(Vec::new(), 64).unwrap();
+    dispatcher.set_test_mode(true);
+
+    // Initial touch on bottom edge (x=800, y=950) -> inside bottom 10% hitbox [900..1000]
+    let f1 = [
+        Event::slot(0),
+        Event::tracking_id(60),
+        Event::x(800),
+        Event::y(950),
+    ];
+    let out1 = engine.process_frame(&f1).unwrap();
+    assert_eq!(out1.slider_steps.len(), 0);
+
+    // Continuous swipe moving LEFT by 150 units (x=800 -> 650)
+    let mut left_steps = 0;
+    for x in (650..=750).rev().step_by(50) {
+        let frame = [Event::slot(0), Event::x(x)];
+        let out = engine.process_frame(&frame).unwrap();
+        for step in out.slider_steps {
+            assert_eq!(step.zone, Zone::Bottom);
+            assert_eq!(step.direction, SliderDirection::Left);
+            dispatcher.dispatch_slider_step(step);
+            left_steps += 1;
+        }
+    }
+    assert_eq!(left_steps, 3);
+
+    // Reverse direction: swipe RIGHT by 100 units (x=650 -> 750)
+    let mut right_steps = 0;
+    for x in (700..=750).step_by(50) {
+        let frame = [Event::slot(0), Event::x(x)];
+        let out = engine.process_frame(&frame).unwrap();
+        for step in out.slider_steps {
+            assert_eq!(step.zone, Zone::Bottom);
+            assert_eq!(step.direction, SliderDirection::Right);
+            dispatcher.dispatch_slider_step(step);
+            right_steps += 1;
+        }
+    }
+    assert_eq!(right_steps, 2);
+
+    // Lift finger: cleans up without emitting duplicate gestures
+    let out_lift = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .unwrap();
+    assert!(out_lift.slider_steps.is_empty());
+    assert!(out_lift.gestures.is_empty());
+
+    let stats = dispatcher.stats();
+    assert_eq!(stats.matched_slider_steps, 5);
 }

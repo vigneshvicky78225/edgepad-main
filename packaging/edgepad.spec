@@ -51,23 +51,28 @@ install -Dpm 0644 packaging/org.edgepad.Edgepad.metainfo.xml %{buildroot}%{_meta
 # Install desktop icon
 install -Dpm 0644 packaging/icons/org.edgepad.Edgepad.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/org.edgepad.Edgepad.svg
 
-# Install systemd user service (adjust path for system install)
-install -d %{buildroot}%{_userunitdir}
-sed 's|%h/\.local/bin/edgepad|%{_bindir}/edgepad|g' packaging/edgepad.service > %{buildroot}%{_userunitdir}/edgepad.service
-chmod 0644 %{buildroot}%{_userunitdir}/edgepad.service
+# Install systemd user service directly using Fedora macro
+install -Dpm 0644 packaging/edgepad.service %{buildroot}%{_userunitdir}/edgepad.service
 
 # Install udev rules for touchpad and uinput permissions
 install -Dpm 0644 packaging/70-edgepad.rules %{buildroot}%{_udevrulesdir}/70-edgepad.rules
 
-# Install default config example
+# Install default config template and example
+install -Dpm 0644 examples/edgepad.toml.example %{buildroot}%{_datadir}/edgepad/edgepad.toml
 install -Dpm 0644 examples/edgepad.toml.example %{buildroot}%{_datadir}/edgepad/edgepad.toml.example
 
 %post
 %systemd_user_post edgepad.service
+udevadm control --reload &>/dev/null || :
+udevadm trigger --subsystem-match=input --action=change &>/dev/null || :
+udevadm trigger --subsystem-match=misc --action=change &>/dev/null || :
 /bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
 
 %postun
-%systemd_user_postun edgepad.service
+%systemd_user_postun_with_restart edgepad.service
+udevadm control --reload &>/dev/null || :
+udevadm trigger --subsystem-match=input --action=change &>/dev/null || :
+udevadm trigger --subsystem-match=misc --action=change &>/dev/null || :
 if [ $1 -eq 0 ] ; then
     /bin/touch --no-create %{_datadir}/icons/hicolor &>/dev/null
     %{_bindir}/gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :

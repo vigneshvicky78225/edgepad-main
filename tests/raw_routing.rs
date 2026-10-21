@@ -225,7 +225,7 @@ fn route_raw_frame_returns_gesture_on_claimed_edge_release_without_passthrough()
         &mut engine,
         &RawFrame::new(vec![
             RawEvent::abs_mt_slot(0),
-            RawEvent::abs_mt_position_x(220),
+            RawEvent::abs_mt_position_x(80),
             RawEvent::abs_mt_position_y(310),
         ]),
     )

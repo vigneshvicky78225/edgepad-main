@@ -13,150 +13,185 @@ ScrollView {
         anchors.margins: 20
         spacing: 16
 
-        // Hero Card
+        // Application Header Card
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 180
-            radius: 12
-            color: "#1e242f"
-            border.color: "#3daee9"
+            implicitHeight: appHeaderRow.implicitHeight + 28
+            radius: 10
+            color: "#1b1f28"
+            border.color: "#28303f"
             border.width: 1
 
             RowLayout {
+                id: appHeaderRow
                 anchors.fill: parent
-                anchors.margins: 24
-                spacing: 20
+                anchors.margins: 16
+                spacing: 16
 
                 Rectangle {
-                    width: 72
-                    height: 72
-                    radius: 36
-                    color: "#3daee9"
+                    width: 44
+                    height: 44
+                    radius: 10
+                    color: "#202530"
+                    border.color: "#3daee9"
+                    border.width: 1
 
                     Text {
                         anchors.centerIn: parent
                         text: "🖐️"
-                        font.pixelSize: 36
+                        font.pixelSize: 22
                     }
                 }
 
                 ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 4
+                    spacing: 3
 
-                    Text {
-                        text: "Edgepad"
-                        font.bold: true
-                        font.pixelSize: 24
-                        color: "#ffffff"
+                    RowLayout {
+                        spacing: 10
+                        Text {
+                            text: "Edgepad"
+                            font.bold: true
+                            font.pixelSize: 18
+                            color: "#ffffff"
+                        }
+                        Rectangle {
+                            implicitWidth: verText.implicitWidth + 12
+                            implicitHeight: 20
+                            radius: 10
+                            color: "#182736"
+                            border.color: "#3daee9"
+                            border.width: 1
+                            Text {
+                                id: verText
+                                anchors.centerIn: parent
+                                text: "v0.2.5"
+                                color: "#38bdf8"
+                                font.bold: true
+                                font.pixelSize: 10
+                            }
+                        }
                     }
 
                     Text {
-                        text: "Native Linux Touchpad Edge Gesture Manager for Fedora KDE Plasma & Wayland"
-                        font.pixelSize: 13
-                        color: "#3daee9"
-                    }
-
-                    Text {
-                        text: "Version 0.1.0 • Built with Rust and Qt 6 / QML"
-                        font.pixelSize: 11
-                        color: "#bdc3c7"
-                    }
-
-                    Text {
-                        text: "Dual-licensed under MIT and Apache-2.0 upstream licenses."
-                        font.pixelSize: 10
-                        color: "#95a5a6"
+                        text: "Touchpad edge gesture manager for Linux (Fedora KDE Plasma & Wayland)"
+                        font.pixelSize: 12
+                        color: "#94a3b8"
                     }
                 }
             }
         }
 
-        // Configuration Backup & Transfer Card
+        // Configuration Management Card
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 130
-            radius: 12
-            color: "#21252d"
-            border.color: "#2f3542"
+            implicitHeight: configCol.implicitHeight + 28
+            radius: 10
+            color: "#1b1f28"
+            border.color: "#28303f"
             border.width: 1
 
             ColumnLayout {
+                id: configCol
                 anchors.fill: parent
-                anchors.margins: 18
-                spacing: 10
+                anchors.margins: 16
+                spacing: 12
 
                 Text {
-                    text: "Configuration Management & Backup"
+                    text: "Configuration"
                     font.bold: true
                     font.pixelSize: 15
                     color: "#ffffff"
                 }
 
                 Text {
-                    text: "Config File: ~/.config/edgepad/edgepad.toml  |  Automatic Backups: ~/.config/edgepad/backups/"
-                    color: "#bdc3c7"
+                    text: "Location: ~/.config/edgepad/edgepad.toml"
+                    color: "#94a3b8"
                     font.pixelSize: 11
                 }
 
                 RowLayout {
                     Layout.fillWidth: true
-                    spacing: 12
+                    spacing: 10
 
                     Button {
-                        text: "Export Configuration..."
+                        text: "Export Config"
+                        icon.name: "document-save"
                         onClicked: {
-                            var p = "/tmp/edgepad_backup.toml"
-                            edgepadController.exportConfig(p)
+                            if (edgepadController) {
+                                var p = "/tmp/edgepad_backup.toml"
+                                edgepadController.exportConfig(p)
+                            }
                         }
                     }
 
                     Button {
-                        text: "Import Configuration..."
+                        text: "Import Config"
+                        icon.name: "document-open"
                         onClicked: {
-                            var p = "/tmp/edgepad_backup.toml"
-                            edgepadController.importConfig(p)
+                            if (edgepadController) {
+                                var p = "/tmp/edgepad_backup.toml"
+                                edgepadController.importConfig(p)
+                            }
                         }
                     }
 
                     Item { Layout.fillHeight: true; Layout.fillWidth: true }
 
                     Button {
-                        text: "Reset All to Factory Defaults"
-                        onClicked: edgepadController.resetToDefaults()
+                        text: "Reset Defaults"
+                        icon.name: "edit-undo"
+                        onClicked: {
+                            if (edgepadController) {
+                                edgepadController.resetToDefaults()
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Architecture & Features Details
+        // System & License Info
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 170
-            radius: 12
-            color: "#21252d"
-            border.color: "#2f3542"
+            implicitHeight: sysInfoCol.implicitHeight + 28
+            radius: 10
+            color: "#1b1f28"
+            border.color: "#28303f"
             border.width: 1
 
             ColumnLayout {
+                id: sysInfoCol
                 anchors.fill: parent
-                anchors.margins: 18
+                anchors.margins: 16
                 spacing: 8
 
                 Text {
-                    text: "Key Architectural Features"
+                    text: "System Information"
                     font.bold: true
                     font.pixelSize: 14
                     color: "#ffffff"
                 }
 
-                Text {
-                    text: "• Native /dev/uinput virtual keyboard backend safely emits real Linux input events (brightness, volume, media keys).\n• Exclusive multi-touch proxy routes edge gestures without intercepting normal pointer motion, clicks, or two-finger scrolling.\n• Low-latency Unix socket IPC daemon communicates with Qt GUI in real time.\n• Zero stuck keys: all virtual keys are logically auto-released on contact release, error, or shutdown."
-                    color: "#bdc3c7"
-                    font.pixelSize: 11
-                    lineHeight: 1.3
+                GridLayout {
+                    columns: 2
+                    rowSpacing: 4
+                    columnSpacing: 16
+
+                    Text { text: "Daemon Service:"; color: "#64748b"; font.pixelSize: 11 }
+                    Text { text: "edgepad.service (systemd --user)"; color: "#cbd5e1"; font.pixelSize: 11 }
+
+                    Text { text: "Backend Engine:"; color: "#64748b"; font.pixelSize: 11 }
+                    Text { text: "Rust • libevdev • uinput"; color: "#cbd5e1"; font.pixelSize: 11 }
+
+                    Text { text: "GUI Framework:"; color: "#64748b"; font.pixelSize: 11 }
+                    Text { text: "PySide6 • Qt Quick / QML"; color: "#cbd5e1"; font.pixelSize: 11 }
+
+                    Text { text: "License:"; color: "#64748b"; font.pixelSize: 11 }
+                    Text { text: "MIT / Apache-2.0 Dual License"; color: "#cbd5e1"; font.pixelSize: 11 }
                 }
             }
         }
     }
 }
+

@@ -19,15 +19,24 @@ Edgepad includes a **high-performance Rust core daemon** and a **native Qt 6 / Q
 - 🖥️ **Native Qt 6 / QML Graphical Interface (`edgepad gui`)**
   - Modern dark-themed interface integrated with KDE Plasma and Wayland.
   - System tray icon with quick controls (toggle gestures, reload config, restart service, test mode).
-  - 7 specialized views: Dashboard, Gestures, Edge Zones, Touchpad Selection, Live Tester, Diagnostics, and About.
+  - 9 genuinely separated views: **Dashboard**, **Tap Actions**, **Edge Gestures**, **Hitbox Calibration**, **Gesture Calibration**, **Live Tester**, **Touchpad Selection**, **Diagnostics**, and **About**.
+- 📐 **Decoupled Hitbox & Gesture Calibration Architecture**
+  - **Hitbox Calibration (Physical Detection Geometry):** Independently calibrates 4 edge hitbox widths (`left`, `right`, `top`, `bottom`) and 4 corner double-tap dimensions (`corner_width`, `corner_height`).
+  - **Gesture Calibration (Recognition & Movement Behavior):** Independently calibrates swipe travel threshold (`swipe_min_distance`), drift tolerance (`swipe_max_drift`), stationary tap motion (`tap_max_movement`), double-tap timeout (`double_tap_timeout_ms`), and discrete encoder step sizes.
+  - **Strict Architectural Isolation:** Changes to physical hitboxes never alter gesture sensitivity; changes to gesture thresholds never resize physical hitboxes.
+- 🎯 **Dedicated Corner Double-Tap Actions & Shortcut Recorder**
+  - Exactly 4 selectable corner zones: `Top-Left`, `Top-Right`, `Bottom-Left`, and `Bottom-Right`.
+  - **Double-Tap Exclusivity:** Single taps in corners never trigger actions, preventing accidental activation during normal pointer movement.
+  - Interactive **Record Shortcut** modal capturing full modifier combinations (`Ctrl`, `Alt`, `Shift`, `Super` + Key) with normalized modifier ordering.
+  - Structured Linux evdev key identifiers stored directly in configuration (e.g., `["KEY_LEFTCTRL", "KEY_LEFTALT", "KEY_T"]`), executed via `/dev/uinput` with forward press and reverse release event ordering.
 - 🎛️ **Distance-Based Rotary Encoder Emulation**
   - Continuous vertical edge swipes act like a hardware rotary knob or dial.
   - Movement distance determines the number of emitted discrete key ticks.
   - Highly tunable: configure `step_size` (movement per tick), `dead_zone` (jitter filter), and `repeat_interval_ms`.
 - ⌨️ **Real Linux Virtual Keyboard (`/dev/uinput`)**
-  - Emits native kernel keycodes (`KEY_BRIGHTNESSUP`, `KEY_BRIGHTNESSDOWN`, `KEY_VOLUMEUP`, `KEY_VOLUMEDOWN`).
+  - Emits native kernel keycodes (`KEY_BRIGHTNESSUP`, `KEY_BRIGHTNESSDOWN`, `KEY_VOLUMEUP`, `KEY_VOLUMEDOWN`) and multi-key combinations.
   - Triggers native desktop on-screen display (OSD) popups directly without sluggish external shell commands (`brightnessctl`, `pactl`, etc.).
-  - Guaranteed zero stuck keys: all virtual keys are automatically released on contact lift, cancellation, or shutdown.
+  - Guaranteed zero stuck keys: all virtual keys and modifiers are automatically released on contact lift, cancellation, or shutdown.
 - 🛡️ **Non-Intrusive Multi-Touch Proxy**
   - Only touches starting in calibrated outer edge margins are claimed for gestures.
   - Center touches, multi-finger gestures, and physical button presses pass through to the desktop completely untouched.

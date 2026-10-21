@@ -37,9 +37,16 @@ pub mod core {
 
     pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 40;
     pub const DEFAULT_TAP_MAX_DURATION_MS: u64 = 180;
+    pub const DEFAULT_TAP_MAX_MOVEMENT: f32 = 0.02;
     pub const DEFAULT_DOUBLE_TAP_TIMEOUT_MS: u64 = 300;
-    pub const DEFAULT_DOUBLE_TAP_MAX_DISTANCE: f32 = 0.04;
+    pub const DEFAULT_DOUBLE_TAP_MAX_DISTANCE: f32 = 0.08;
     pub const DEFAULT_SWIPE_MIN_DISTANCE: f32 = 0.02;
+    pub const DEFAULT_SWIPE_MAX_DRIFT: f32 = 1.0;
+    pub const DEFAULT_CORNER_HITBOX: f32 = 0.15;
+    pub const DEFAULT_CORNER_WIDTH: f32 = 0.15;
+    pub const DEFAULT_CORNER_HEIGHT: f32 = 0.15;
+    pub const MIN_CORNER_DIMENSION: f32 = 0.05;
+    pub const MAX_CORNER_DIMENSION: f32 = 0.35;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct AxisRange {
@@ -48,12 +55,12 @@ pub mod core {
     }
 
     impl AxisRange {
-        fn normalize(self, value: i32) -> f32 {
+        pub fn normalize(self, value: i32) -> f32 {
             let span = (self.max - self.min).max(1) as f32;
             (value - self.min) as f32 / span
         }
 
-        fn normalize_delta(self, start: i32, end: i32) -> f32 {
+        pub fn normalize_delta(self, start: i32, end: i32) -> f32 {
             let span = (self.max - self.min).max(1) as f32;
             (end - start) as f32 / span
         }
@@ -117,12 +124,16 @@ pub mod core {
         }
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum Zone {
         Left,
         Right,
         Top,
         Bottom,
+        TopLeft,
+        TopRight,
+        BottomLeft,
+        BottomRight,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -140,7 +151,11 @@ pub mod core {
 
     impl ZoneSet {
         pub const fn all() -> Self {
-            Self(0b1111)
+            Self(0b0000_1111)
+        }
+
+        pub const fn all_with_corners() -> Self {
+            Self(0b1111_1111)
         }
 
         pub fn from_zones(zones: impl IntoIterator<Item = Zone>) -> Self {
@@ -162,6 +177,10 @@ pub mod core {
             Zone::Right => 1 << 1,
             Zone::Top => 1 << 2,
             Zone::Bottom => 1 << 3,
+            Zone::TopLeft => 1 << 4,
+            Zone::TopRight => 1 << 5,
+            Zone::BottomLeft => 1 << 6,
+            Zone::BottomRight => 1 << 7,
         }
     }
 
@@ -198,12 +217,18 @@ pub mod core {
     pub struct EngineOptions {
         pub tap_min_duration: Duration,
         pub tap_max_duration: Duration,
+        pub tap_max_movement: f32,
         pub swipe_min_distance: f32,
+        pub swipe_max_drift: f32,
         pub double_tap_timeout: Duration,
         pub double_tap_max_distance: f32,
         pub double_tap_zones: ZoneSet,
         pub single_tap_zones: ZoneSet,
+        pub active_zones: ZoneSet,
         pub encoder: crate::encoder::EncoderConfig,
+        pub corner_hitbox: f32,
+        pub corner_width: f32,
+        pub corner_height: f32,
     }
 
     impl Default for EngineOptions {
@@ -211,15 +236,21 @@ pub mod core {
             Self {
                 tap_min_duration: Duration::from_millis(DEFAULT_TAP_MIN_DURATION_MS),
                 tap_max_duration: Duration::from_millis(DEFAULT_TAP_MAX_DURATION_MS),
+                tap_max_movement: DEFAULT_TAP_MAX_MOVEMENT,
                 swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
+                swipe_max_drift: DEFAULT_SWIPE_MAX_DRIFT,
                 double_tap_timeout: Duration::from_millis(DEFAULT_DOUBLE_TAP_TIMEOUT_MS),
                 double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
                 double_tap_zones: ZoneSet::default(),
                 single_tap_zones: ZoneSet::all(),
+                active_zones: ZoneSet::all(),
                 encoder: crate::encoder::EncoderConfig {
                     enabled: false,
                     ..crate::encoder::EncoderConfig::default()
                 },
+                corner_hitbox: DEFAULT_CORNER_HITBOX,
+                corner_width: DEFAULT_CORNER_WIDTH,
+                corner_height: DEFAULT_CORNER_HEIGHT,
             }
         }
     }
@@ -247,11 +278,19 @@ pub mod core {
         pub y: i32,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct GestureCancellation {
+        pub zone: Zone,
+        pub slot: i32,
+        pub tracking_id: i32,
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FrameOutput {
         pub passthrough: Vec<Event>,
         pub gestures: Vec<Gesture>,
         pub slider_steps: Vec<SliderStep>,
+        pub cancellations: Vec<GestureCancellation>,
         pub resync_required: bool,
     }
 
@@ -261,6 +300,7 @@ pub mod core {
                 passthrough: Vec::new(),
                 gestures: Vec::new(),
                 slider_steps: Vec::new(),
+                cancellations: Vec::new(),
                 resync_required: false,
             }
         }
@@ -288,10 +328,11 @@ pub mod core {
     // an existing pointer contact. A physical click on a buttonpad can promote
     // an edge contact to passthrough so click-drag still works.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Ownership {
+    pub enum Ownership {
         // Buffer events until the initial position is known at a frame boundary.
         Unknown,
         Claimed(Zone),
+        CancelledUntilLift,
         Passthrough,
     }
 
@@ -379,20 +420,20 @@ pub mod core {
             };
         }
 
-        fn observe_position(&mut self, capabilities: Capabilities, swipe_min_distance: f32) {
+        fn observe_position(&mut self, capabilities: Capabilities, tap_max_movement: f32) {
             if self.contact_phase != ContactPhase::TapCandidate {
                 return;
             }
 
             let moved_x = match (self.start_x, self.current_x) {
                 (Some(start), Some(current)) => {
-                    capabilities.x.normalize_delta(start, current).abs() >= swipe_min_distance
+                    capabilities.x.normalize_delta(start, current).abs() >= tap_max_movement
                 }
                 _ => false,
             };
             let moved_y = match (self.start_y, self.current_y) {
                 (Some(start), Some(current)) => {
-                    capabilities.y.normalize_delta(start, current).abs() >= swipe_min_distance
+                    capabilities.y.normalize_delta(start, current).abs() >= tap_max_movement
                 }
                 _ => false,
             };
@@ -670,6 +711,10 @@ pub mod core {
                         slot_state.tap_sequence_eligible = !another_contact_active;
                         slot_state.tap_sequence_match = false;
                         slot_state.held_events.push(event);
+                        eprintln!(
+                            "[EDGEPAD_EVENT] [1/7-EVENT_RECEIVED] Physical touch down on slot {} (tracking_id={})",
+                            slot, tracking_id
+                        );
                     }
                     Event::TrackingId(-1) => {
                         self.release_current_slot(event, timestamp, &mut output)?;
@@ -679,7 +724,7 @@ pub mod core {
                     }
                     Event::X(x) => {
                         let capabilities = self.caps;
-                        let swipe_min_distance = self.options.swipe_min_distance;
+                        let tap_max_movement = self.options.tap_max_movement;
                         let sequence_invalidated = {
                             let slot_state = self.slot_mut(self.current_slot)?;
                             slot_state.retained_x = Some(x);
@@ -687,7 +732,7 @@ pub mod core {
                             if slot_state.active && slot_state.start_x.is_none() {
                                 slot_state.start_x = Some(x);
                             }
-                            slot_state.observe_position(capabilities, swipe_min_distance);
+                            slot_state.observe_position(capabilities, tap_max_movement);
                             slot_state.tap_sequence_match
                                 && slot_state.contact_phase != ContactPhase::TapCandidate
                         };
@@ -698,7 +743,7 @@ pub mod core {
                     }
                     Event::Y(y) => {
                         let capabilities = self.caps;
-                        let swipe_min_distance = self.options.swipe_min_distance;
+                        let tap_max_movement = self.options.tap_max_movement;
                         let sequence_invalidated = {
                             let slot_state = self.slot_mut(self.current_slot)?;
                             slot_state.retained_y = Some(y);
@@ -706,7 +751,7 @@ pub mod core {
                             if slot_state.active && slot_state.start_y.is_none() {
                                 slot_state.start_y = Some(y);
                             }
-                            slot_state.observe_position(capabilities, swipe_min_distance);
+                            slot_state.observe_position(capabilities, tap_max_movement);
                             slot_state.tap_sequence_match
                                 && slot_state.contact_phase != ContactPhase::TapCandidate
                         };
@@ -719,6 +764,7 @@ pub mod core {
 
                 if !self.slot(self.current_slot)?.began_in_frame {
                     self.decide_ownership_if_ready(&mut output)?;
+                    self.validate_confinement_for_slot(self.current_slot, &mut output)?;
                     self.emit_slider_steps_if_ready(&mut output)?;
                 }
             }
@@ -754,6 +800,7 @@ pub mod core {
                 if should_finalize {
                     self.current_slot = slot_number;
                     self.decide_ownership_if_ready(output)?;
+                    self.validate_confinement_for_slot(slot_number, output)?;
                     self.emit_slider_steps_if_ready(output)?;
                 }
             }
@@ -768,10 +815,12 @@ pub mod core {
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
+            self.validate_confinement_for_slot(slot, output)?;
             match self.slot(slot)?.ownership {
                 Ownership::Claimed(zone) => {
                     let releases_slider_zone = self.slider_for_zone(zone).is_some()
-                        || (self.options.encoder.enabled && matches!(zone, Zone::Left | Zone::Right));
+                        || (self.options.encoder.enabled
+                            && matches!(zone, Zone::Left | Zone::Right | Zone::Top | Zone::Bottom));
                     let options = self.options;
                     let capabilities = self.caps;
                     let classified = {
@@ -804,6 +853,11 @@ pub mod core {
                         self.flush_pending_tap(output);
                     }
                 }
+                Ownership::CancelledUntilLift => {
+                    if self.slot(slot)?.active {
+                        self.slot_mut(slot)?.finish_contact();
+                    }
+                }
                 Ownership::Passthrough => {
                     self.push_passthrough_event_for_current_slot(event, output);
                     if self.slot(slot)?.active {
@@ -832,7 +886,7 @@ pub mod core {
                     self.push_passthrough_event_for_current_slot(event, output)
                 }
                 Ownership::Unknown => slot_state.held_events.push(event),
-                Ownership::Claimed(_) => {}
+                Ownership::Claimed(_) | Ownership::CancelledUntilLift => {}
             }
             Ok(())
         }
@@ -920,6 +974,10 @@ pub mod core {
                 slot_state.slider_anchor = slider_anchor;
                 slot_state.tap_sequence_match = sequence_match;
                 slot_state.held_events.clear();
+                eprintln!(
+                    "[EDGEPAD_EVENT] [2/7-ZONE_DETECTED] Edge zone {:?} claimed on slot {} (start_x={:?}, start_y={:?})",
+                    zone, slot, slot_state.start_x, slot_state.start_y
+                );
             }
             Ok(())
         }
@@ -961,18 +1019,16 @@ pub mod core {
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
-            let (zone, current_y, tracking_id) = {
+            self.validate_confinement_for_slot(slot, output)?;
+            let (zone, tracking_id) = {
                 let slot_state = self.slot(slot)?;
                 let Ownership::Claimed(zone) = slot_state.ownership else {
-                    return Ok(());
-                };
-                let Some(current_y) = slot_state.current_y else {
                     return Ok(());
                 };
                 let Some(tracking_id) = slot_state.tracking_id else {
                     return Ok(());
                 };
-                (zone, current_y, tracking_id)
+                (zone, tracking_id)
             };
 
             // 1. Explicit slider specs take priority if configured
@@ -1025,23 +1081,43 @@ pub mod core {
                 return Ok(());
             }
 
-            // 2. Otherwise, distance-based rotary encoder mode for vertical edge swipes
-            if self.options.encoder.enabled && matches!(zone, Zone::Left | Zone::Right) {
+            // 2. Otherwise, distance-based rotary encoder mode for edge swipes
+            if self.options.encoder.enabled
+                && matches!(zone, Zone::Left | Zone::Right | Zone::Top | Zone::Bottom)
+            {
                 let encoder_config = self.options.encoder;
-                let y_caps = self.caps.y;
+                let axis = match zone {
+                    Zone::Left | Zone::Right => SliderAxis::Vertical,
+                    Zone::Top | Zone::Bottom => SliderAxis::Horizontal,
+                    _ => SliderAxis::Vertical,
+                };
+                let slot_state = self.slot(slot)?;
+                let (range, start_pos, current_pos) = match axis {
+                    SliderAxis::Vertical => {
+                        let Some(cur) = slot_state.current_y else {
+                            return Ok(());
+                        };
+                        let start = slot_state.start_y.unwrap_or(cur);
+                        (self.caps.y, start, cur)
+                    }
+                    SliderAxis::Horizontal => {
+                        let Some(cur) = slot_state.current_x else {
+                            return Ok(());
+                        };
+                        let start = slot_state.start_x.unwrap_or(cur);
+                        (self.caps.x, start, cur)
+                    }
+                };
                 let slot_state = self.slot_mut(slot)?;
                 if slot_state.encoder.is_none() {
-                    let mut encoder = crate::encoder::EncoderAccumulator::new(
-                        encoder_config,
-                        y_caps,
-                    );
-                    let start_y = slot_state.start_y.unwrap_or(current_y);
-                    encoder.start_contact(zone, slot, tracking_id, start_y);
+                    let mut encoder =
+                        crate::encoder::EncoderAccumulator::with_axis(encoder_config, axis, range);
+                    encoder.start_contact(zone, slot, tracking_id, start_pos);
                     slot_state.encoder = Some(encoder);
                 }
 
                 let ticks = if let Some(ref mut encoder) = slot_state.encoder {
-                    encoder.update(current_y)
+                    encoder.update(current_pos)
                 } else {
                     Vec::new()
                 };
@@ -1076,26 +1152,168 @@ pub mod core {
                 .find(|slider| slider.zone == zone)
         }
 
+        pub fn zone_at_normalized(&self, x: f32, y: f32) -> Option<Zone> {
+            let is_left = self.edges.left > 0.0 && x < self.edges.left;
+            let is_right = self.edges.right > 0.0 && x > 1.0 - self.edges.right;
+            let is_top = self.edges.top > 0.0 && y < self.edges.top;
+            let is_bottom = self.edges.bottom > 0.0 && y > 1.0 - self.edges.bottom;
+
+            let corner_w = if self.options.corner_width != DEFAULT_CORNER_WIDTH {
+                self.options.corner_width
+            } else if self.options.corner_hitbox > 0.0 {
+                self.options.corner_hitbox
+            } else {
+                DEFAULT_CORNER_WIDTH
+            };
+            let corner_h = if self.options.corner_height != DEFAULT_CORNER_HEIGHT {
+                self.options.corner_height
+            } else if self.options.corner_hitbox > 0.0 {
+                self.options.corner_hitbox
+            } else {
+                DEFAULT_CORNER_HEIGHT
+            };
+            let is_corner_left = x < corner_w;
+            let is_corner_right = x > 1.0 - corner_w;
+            let is_corner_top = y < corner_h;
+            let is_corner_bottom = y > 1.0 - corner_h;
+
+            if is_corner_left && is_corner_top && self.options.active_zones.contains(Zone::TopLeft)
+            {
+                Some(Zone::TopLeft)
+            } else if is_corner_right
+                && is_corner_top
+                && self.options.active_zones.contains(Zone::TopRight)
+            {
+                Some(Zone::TopRight)
+            } else if is_corner_left
+                && is_corner_bottom
+                && self.options.active_zones.contains(Zone::BottomLeft)
+            {
+                Some(Zone::BottomLeft)
+            } else if is_corner_right
+                && is_corner_bottom
+                && self.options.active_zones.contains(Zone::BottomRight)
+            {
+                Some(Zone::BottomRight)
+            } else if is_left && self.options.active_zones.contains(Zone::Left) {
+                Some(Zone::Left)
+            } else if is_right && self.options.active_zones.contains(Zone::Right) {
+                Some(Zone::Right)
+            } else if is_top && self.options.active_zones.contains(Zone::Top) {
+                Some(Zone::Top)
+            } else if is_bottom && self.options.active_zones.contains(Zone::Bottom) {
+                Some(Zone::Bottom)
+            } else {
+                None
+            }
+        }
+
+        pub fn zone_at(&self, raw_x: i32, raw_y: i32) -> Option<Zone> {
+            let x = self.caps.x.normalize(raw_x);
+            let y = self.caps.y.normalize(raw_y);
+            self.zone_at_normalized(x, y)
+        }
+
+        pub fn is_within_zone_normalized(&self, zone: Zone, x: f32, y: f32) -> bool {
+            let corner_w = if self.options.corner_width != DEFAULT_CORNER_WIDTH {
+                self.options.corner_width
+            } else if self.options.corner_hitbox > 0.0 {
+                self.options.corner_hitbox
+            } else {
+                DEFAULT_CORNER_WIDTH
+            };
+            let corner_h = if self.options.corner_height != DEFAULT_CORNER_HEIGHT {
+                self.options.corner_height
+            } else if self.options.corner_hitbox > 0.0 {
+                self.options.corner_hitbox
+            } else {
+                DEFAULT_CORNER_HEIGHT
+            };
+
+            match zone {
+                Zone::Left => self.edges.left > 0.0 && x < self.edges.left,
+                Zone::Right => self.edges.right > 0.0 && x > 1.0 - self.edges.right,
+                Zone::Top => self.edges.top > 0.0 && y < self.edges.top,
+                Zone::Bottom => self.edges.bottom > 0.0 && y > 1.0 - self.edges.bottom,
+                Zone::TopLeft => x < corner_w && y < corner_h,
+                Zone::TopRight => x > 1.0 - corner_w && y < corner_h,
+                Zone::BottomLeft => x < corner_w && y > 1.0 - corner_h,
+                Zone::BottomRight => x > 1.0 - corner_w && y > 1.0 - corner_h,
+            }
+        }
+
+        pub fn is_within_zone(&self, zone: Zone, raw_x: i32, raw_y: i32) -> bool {
+            let x = self.caps.x.normalize(raw_x);
+            let y = self.caps.y.normalize(raw_y);
+            self.is_within_zone_normalized(zone, x, y)
+        }
+
+        fn cancel_claimed_slot(
+            &mut self,
+            slot: i32,
+            zone: Zone,
+            output: &mut FrameOutput,
+        ) -> Result<(), SlotError> {
+            let tracking_id = self.slot(slot)?.tracking_id.unwrap_or_default();
+            eprintln!(
+                "[EDGEPAD_EVENT] [ZONE_EXIT_CANCEL] Gesture in zone {:?} on slot {} (tracking_id={}) exited active hitbox. Cancelling gesture.",
+                zone, slot, tracking_id
+            );
+
+            let slot_mut = self.slot_mut(slot)?;
+            slot_mut.ownership = Ownership::CancelledUntilLift;
+            slot_mut.encoder = None;
+            slot_mut.slider_anchor = None;
+            slot_mut.tap_sequence_eligible = false;
+            slot_mut.tap_sequence_match = false;
+
+            if let Some(pending) = self.pending_tap {
+                if pending.gesture.slot == slot && pending.gesture.zone == zone {
+                    self.pending_tap = None;
+                } else {
+                    self.flush_pending_tap(output);
+                }
+            }
+
+            output.cancellations.push(GestureCancellation {
+                zone,
+                slot,
+                tracking_id,
+            });
+
+            Ok(())
+        }
+
+        pub fn validate_confinement_for_slot(
+            &mut self,
+            slot: i32,
+            output: &mut FrameOutput,
+        ) -> Result<(), SlotError> {
+            let slot_state = self.slot(slot)?;
+            if !slot_state.active {
+                return Ok(());
+            }
+            let Ownership::Claimed(zone) = slot_state.ownership else {
+                return Ok(());
+            };
+            let (Some(current_x), Some(current_y)) = (slot_state.current_x, slot_state.current_y)
+            else {
+                return Ok(());
+            };
+
+            if !self.is_within_zone(zone, current_x, current_y) {
+                self.cancel_claimed_slot(slot, zone, output)?;
+            }
+
+            Ok(())
+        }
+
         fn zone_for_current_slot(&self) -> Result<Option<Zone>, SlotError> {
             let slot_state = self.slot(self.current_slot)?;
             if !slot_state.active || slot_state.start_x.is_none() || slot_state.start_y.is_none() {
                 return Ok(None);
             }
-            let x = self.caps.x.normalize(slot_state.start_x.unwrap());
-            let y = self.caps.y.normalize(slot_state.start_y.unwrap());
-
-            let zone = if x < self.edges.left {
-                Some(Zone::Left)
-            } else if x > 1.0 - self.edges.right {
-                Some(Zone::Right)
-            } else if y < self.edges.top {
-                Some(Zone::Top)
-            } else if y > 1.0 - self.edges.bottom {
-                Some(Zone::Bottom)
-            } else {
-                None
-            };
-            Ok(zone)
+            Ok(self.zone_at(slot_state.start_x.unwrap(), slot_state.start_y.unwrap()))
         }
 
         fn ensure_slot(&self, slot: i32) -> Result<(), SlotError> {
@@ -1138,6 +1356,10 @@ pub mod core {
             }
 
             if sequence_match && self.pending_tap.take().is_some() {
+                eprintln!(
+                    "[EDGEPAD_EVENT] [3/7-TAP_RECOGNIZED] Double-tap recognized on zone {:?} (slot={})",
+                    gesture.zone, gesture.slot
+                );
                 output.gestures.push(Gesture {
                     direction: GestureDirection::DoubleTap,
                     ..gesture
@@ -1148,6 +1370,10 @@ pub mod core {
             if !sequence_eligible {
                 self.flush_pending_tap(output);
                 if self.options.single_tap_zones.contains(gesture.zone) {
+                    eprintln!(
+                        "[EDGEPAD_EVENT] [3/7-TAP_RECOGNIZED] Single tap recognized on zone {:?} (slot={})",
+                        gesture.zone, gesture.slot
+                    );
                     output.gestures.push(gesture);
                 }
                 return;
@@ -1158,6 +1384,10 @@ pub mod core {
                 && x.is_some()
                 && y.is_some();
             if !can_start_sequence {
+                eprintln!(
+                    "[EDGEPAD_EVENT] [3/7-TAP_RECOGNIZED] Single tap recognized on zone {:?} (slot={})",
+                    gesture.zone, gesture.slot
+                );
                 output.gestures.push(gesture);
                 return;
             }
@@ -1189,6 +1419,14 @@ pub mod core {
             else {
                 return Ok(false);
             };
+            if !self.is_within_zone(zone, x, y) {
+                return Ok(false);
+            }
+            if let (Some(cur_x), Some(cur_y)) = (state.current_x, state.current_y) {
+                if !self.is_within_zone(zone, cur_x, cur_y) {
+                    return Ok(false);
+                }
+            }
             let Some(gap) = started_at.checked_sub(pending.released_at) else {
                 return Ok(false);
             };
@@ -1235,6 +1473,10 @@ pub mod core {
             }
             if let Some(pending) = self.pending_tap.take() {
                 if pending.emit_single {
+                    eprintln!(
+                        "[EDGEPAD_EVENT] [3/7-TAP_RECOGNIZED] Single tap recognized on zone {:?} (slot={})",
+                        pending.gesture.zone, pending.gesture.slot
+                    );
                     output.gestures.push(pending.gesture);
                 }
             }
@@ -1295,12 +1537,48 @@ pub mod core {
             "double-tap distance must be > 0 and <= 1"
         );
         assert!(
+            options.corner_hitbox.is_finite()
+                && options.corner_hitbox >= MIN_CORNER_DIMENSION
+                && options.corner_hitbox <= MAX_CORNER_DIMENSION,
+            "corner hitbox must be between 0.05 and 0.35"
+        );
+        assert!(
+            options.corner_width.is_finite()
+                && options.corner_width >= MIN_CORNER_DIMENSION
+                && options.corner_width <= MAX_CORNER_DIMENSION,
+            "corner width must be between 0.05 and 0.35"
+        );
+        assert!(
+            options.corner_height.is_finite()
+                && options.corner_height >= MIN_CORNER_DIMENSION
+                && options.corner_height <= MAX_CORNER_DIMENSION,
+            "corner height must be between 0.05 and 0.35"
+        );
+        assert!(
+            options.tap_max_movement.is_finite()
+                && options.tap_max_movement > 0.0
+                && options.tap_max_movement <= 1.0,
+            "tap max movement must be > 0 and <= 1"
+        );
+        assert!(
             options.encoder.step_size.is_finite() && options.encoder.step_size > 0.0,
             "encoder step size must be positive"
         );
         assert!(
             options.encoder.dead_zone.is_finite() && options.encoder.dead_zone >= 0.0,
             "encoder dead zone must be non-negative"
+        );
+        assert!(
+            options.swipe_min_distance.is_finite()
+                && options.swipe_min_distance > 0.0
+                && options.swipe_min_distance <= 1.0,
+            "swipe min distance must be > 0 and <= 1"
+        );
+        assert!(
+            options.swipe_max_drift.is_finite()
+                && options.swipe_max_drift > 0.0
+                && options.swipe_max_drift <= 1.0,
+            "swipe max drift must be > 0 and <= 1"
         );
         assert!(
             !options.encoder.repeat_interval.is_zero(),
@@ -1324,6 +1602,23 @@ pub mod core {
         let dy = capabilities.y.normalize_delta(start_y, current_y);
 
         let final_direction = direction_for_displacement(dx, dy, options.swipe_min_distance);
+
+        // Check horizontal / perpendicular drift threshold
+        if let Some(swipe_dir) = final_direction {
+            let perpendicular_drift = match swipe_dir {
+                GestureDirection::Up | GestureDirection::Down => dx.abs(),
+                GestureDirection::Left | GestureDirection::Right => dy.abs(),
+                _ => 0.0,
+            };
+            if perpendicular_drift > options.swipe_max_drift {
+                eprintln!(
+                    "[EDGEPAD_EVENT] [7/7-FAILURE] Swipe rejected in zone {:?}: perpendicular drift {:.4} exceeded max drift {:.4}",
+                    zone, perpendicular_drift, options.swipe_max_drift
+                );
+                return None;
+            }
+        }
+
         let direction = match state.contact_phase {
             ContactPhase::TapCandidate => match final_direction {
                 Some(direction) => direction,
@@ -1334,6 +1629,14 @@ pub mod core {
                         options.tap_min_duration,
                         options.tap_max_duration,
                     ) {
+                        let dur = match (state.started_at, released_at) {
+                            (Some(s), Some(r)) => r.checked_sub(s),
+                            _ => None,
+                        };
+                        eprintln!(
+                            "[EDGEPAD_EVENT] [7/7-FAILURE] Tap rejected in zone {:?} on slot {}: duration {:?} outside allowed range [{:?}, {:?}]",
+                            zone, slot, dur, options.tap_min_duration, options.tap_max_duration
+                        );
                         return None;
                     }
                     GestureDirection::Tap

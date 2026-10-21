@@ -9,7 +9,7 @@ Dialog {
     property var knownKeysList: []
     signal keySelected(string keyName, int keyCode)
 
-    title: "Select Linux Keyboard Key"
+    title: "Select Key"
     standardButtons: Dialog.Ok | Dialog.Cancel
     modal: true
     width: 520
@@ -36,7 +36,7 @@ Dialog {
         TextField {
             id: searchField
             Layout.fillWidth: true
-            placeholderText: "Search by key name (e.g. brightness, volume, play, f1)..."
+            placeholderText: "Search keys (e.g. brightness, volume, F1)..."
             selectByMouse: true
 
             onTextChanged: {

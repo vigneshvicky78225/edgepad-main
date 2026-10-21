@@ -17,45 +17,44 @@ ScrollView {
         // Page Header
         RowLayout {
             Layout.fillWidth: true
-            ColumnLayout {
+
+            Text {
+                text: "Diagnostics"
+                font.bold: true
+                font.pixelSize: 20
+                color: "#ffffff"
                 Layout.fillWidth: true
-                spacing: 2
-                Text {
-                    text: "System Diagnostics & Troubleshooting"
-                    font.bold: true
-                    font.pixelSize: 22
-                    color: "#ffffff"
-                }
-                Text {
-                    text: "Inspect runtime health checks, service errors, and journal logs without the terminal"
-                    font.pixelSize: 13
-                    color: "#95a5a6"
-                }
             }
 
             Button {
-                text: "Refresh Checks"
-                onClicked: edgepadController.refreshAll()
+                text: "Refresh"
+                icon.name: "view-refresh"
+                onClicked: if (edgepadController) edgepadController.refreshAll()
             }
 
             Button {
-                text: "Export Diagnostic Report"
+                text: "Export Report"
+                icon.name: "document-save"
                 highlighted: true
                 onClicked: {
-                    var path = "/tmp/edgepad_diagnostics_report.md"
-                    edgepadController.exportDiagnostics(path)
+                    if (edgepadController) {
+                        var path = "/tmp/edgepad_diagnostics_report.md"
+                        edgepadController.exportDiagnostics(path)
+                    }
                 }
             }
         }
 
         // Doctor Health Checks Summary Cards
-        RowLayout {
+        GridLayout {
             Layout.fillWidth: true
-            spacing: 14
+            columns: root.width > 650 ? 3 : 1
+            rowSpacing: 10
+            columnSpacing: 14
 
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: 70
+                implicitHeight: 56
                 radius: 8
                 color: "#1e2b37"
                 border.color: "#27ae60"
@@ -64,17 +63,19 @@ ScrollView {
                 RowLayout {
                     anchors.centerIn: parent
                     spacing: 10
-                    Text { text: "✓"; color: "#27ae60"; font.bold: true; font.pixelSize: 22 }
-                    ColumnLayout {
-                        Text { text: (edgepadController.doctorReport.summary ? edgepadController.doctorReport.summary.ok : "5") + " Passed"; color: "#ffffff"; font.bold: true; font.pixelSize: 14 }
-                        Text { text: "Healthy prerequisites"; color: "#95a5a6"; font.pixelSize: 11 }
+                    Text { text: "✓"; color: "#27ae60"; font.bold: true; font.pixelSize: 20 }
+                    Text {
+                        text: ((edgepadController && edgepadController.doctorReport && edgepadController.doctorReport.summary) ? edgepadController.doctorReport.summary.ok : "5") + " Passed"
+                        color: "#ffffff"
+                        font.bold: true
+                        font.pixelSize: 14
                     }
                 }
             }
 
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: 70
+                implicitHeight: 56
                 radius: 8
                 color: "#2b251e"
                 border.color: "#f39c12"
@@ -83,17 +84,19 @@ ScrollView {
                 RowLayout {
                     anchors.centerIn: parent
                     spacing: 10
-                    Text { text: "⚠"; color: "#f39c12"; font.bold: true; font.pixelSize: 22 }
-                    ColumnLayout {
-                        Text { text: (edgepadController.doctorReport.summary ? edgepadController.doctorReport.summary.warn : "0") + " Warnings"; color: "#ffffff"; font.bold: true; font.pixelSize: 14 }
-                        Text { text: "Non-fatal notes"; color: "#95a5a6"; font.pixelSize: 11 }
+                    Text { text: "⚠"; color: "#f39c12"; font.bold: true; font.pixelSize: 20 }
+                    Text {
+                        text: ((edgepadController && edgepadController.doctorReport && edgepadController.doctorReport.summary) ? edgepadController.doctorReport.summary.warn : "0") + " Warnings"
+                        color: "#ffffff"
+                        font.bold: true
+                        font.pixelSize: 14
                     }
                 }
             }
 
             Rectangle {
                 Layout.fillWidth: true
-                implicitHeight: 70
+                implicitHeight: 56
                 radius: 8
                 color: "#2b1e1e"
                 border.color: "#e74c3c"
@@ -102,10 +105,12 @@ ScrollView {
                 RowLayout {
                     anchors.centerIn: parent
                     spacing: 10
-                    Text { text: "✗"; color: "#e74c3c"; font.bold: true; font.pixelSize: 22 }
-                    ColumnLayout {
-                        Text { text: (edgepadController.doctorReport.summary ? edgepadController.doctorReport.summary.fail : "0") + " Failures"; color: "#ffffff"; font.bold: true; font.pixelSize: 14 }
-                        Text { text: "Action required"; color: "#95a5a6"; font.pixelSize: 11 }
+                    Text { text: "✗"; color: "#e74c3c"; font.bold: true; font.pixelSize: 20 }
+                    Text {
+                        text: ((edgepadController && edgepadController.doctorReport && edgepadController.doctorReport.summary) ? edgepadController.doctorReport.summary.fail : "0") + " Failures"
+                        color: "#ffffff"
+                        font.bold: true
+                        font.pixelSize: 14
                     }
                 }
             }
@@ -114,10 +119,10 @@ ScrollView {
         // Doctor Checks Detail Table
         Rectangle {
             Layout.fillWidth: true
-            implicitHeight: 260
+            implicitHeight: 240
             radius: 10
-            color: "#21252d"
-            border.color: "#2f3542"
+            color: "#1b1f28"
+            border.color: "#28303f"
             border.width: 1
 
             ColumnLayout {
@@ -126,7 +131,7 @@ ScrollView {
                 spacing: 8
 
                 Text {
-                    text: "Health Checks (edgepad doctor)"
+                    text: "Health Checks"
                     font.bold: true
                     font.pixelSize: 14
                     color: "#ffffff"
@@ -139,14 +144,14 @@ ScrollView {
 
                     ListView {
                         id: doctorList
-                        model: edgepadController.doctorReport.items || []
+                        model: (edgepadController && edgepadController.doctorReport && edgepadController.doctorReport.items) ? edgepadController.doctorReport.items : []
                         spacing: 6
 
                         delegate: Rectangle {
                             width: doctorList.width
-                            height: 38
+                            height: 36
                             radius: 6
-                            color: "#1a1d24"
+                            color: "#15181e"
 
                             RowLayout {
                                 anchors.fill: parent
@@ -155,7 +160,7 @@ ScrollView {
                                 spacing: 10
 
                                 Rectangle {
-                                    implicitWidth: 60
+                                    implicitWidth: 54
                                     implicitHeight: 20
                                     radius: 3
                                     color: {
@@ -183,7 +188,7 @@ ScrollView {
 
                                 Text {
                                     text: modelData.details
-                                    color: "#bdc3c7"
+                                    color: "#94a3b8"
                                     font.pixelSize: 11
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
@@ -200,8 +205,8 @@ ScrollView {
             Layout.fillWidth: true
             implicitHeight: 220
             radius: 10
-            color: "#1a1d24"
-            border.color: "#2f3542"
+            color: "#1b1f28"
+            border.color: "#28303f"
             border.width: 1
 
             ColumnLayout {
@@ -212,15 +217,16 @@ ScrollView {
                 RowLayout {
                     Layout.fillWidth: true
                     Text {
-                        text: "Recent Service Output (journalctl -u edgepad.service)"
+                        text: "Service Logs"
                         font.bold: true
                         font.pixelSize: 13
                         color: "#ffffff"
                         Layout.fillWidth: true
                     }
                     Button {
-                        text: "Fetch Logs"
-                        onClicked: edgepadController.refreshLogs()
+                        text: "Refresh Logs"
+                        icon.name: "view-refresh"
+                        onClicked: if (edgepadController) edgepadController.refreshLogs()
                     }
                 }
 
@@ -231,11 +237,11 @@ ScrollView {
 
                     TextArea {
                         readOnly: true
-                        text: edgepadController.serviceLogs || "No recent journal logs found for edgepad.service."
+                        text: (edgepadController && edgepadController.serviceLogs) ? edgepadController.serviceLogs : "No recent journal logs found for edgepad.service."
                         font.family: "monospace"
                         font.pixelSize: 11
-                        color: "#bdc3c7"
-                        background: Rectangle { color: "#14171d"; radius: 6 }
+                        color: "#94a3b8"
+                        background: Rectangle { color: "#12151b"; radius: 6 }
                         selectByMouse: true
                     }
                 }
@@ -243,3 +249,4 @@ ScrollView {
         }
     }
 }
+

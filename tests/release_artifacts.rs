@@ -49,6 +49,12 @@ fn release_example_config_parses_and_uses_axis_appropriate_gestures() {
                     "bottom examples should use horizontal gestures: {binding:?}"
                 );
             }
+            Zone::TopLeft | Zone::TopRight | Zone::BottomLeft | Zone::BottomRight => {
+                assert!(
+                    matches!(binding.direction, GestureDirection::DoubleTap),
+                    "corner zones should only use double-tap gestures: {binding:?}"
+                );
+            }
         }
         assert!(
             matches!(binding.action, GestureActionConfig::Command { .. }),
@@ -72,17 +78,84 @@ fn release_user_service_runs_installed_user_binary_with_config() {
     let service = include_str!("../packaging/edgepad.service");
 
     assert!(
-        service.contains(
-            "ExecStart=%h/.local/bin/edgepad daemon --config %h/.config/edgepad/edgepad.toml"
-        ),
+        service.contains("ExecStart=/usr/bin/edgepad daemon"),
         "service was: {service}"
+    );
+    assert!(
+        !service.contains("/home/vicky"),
+        "service must not contain developer paths"
+    );
+    assert!(
+        !service.contains("%h/.local/bin"),
+        "service must not hardcode user local bin"
     );
     assert!(service.contains("WantedBy=default.target"));
     assert!(service.contains("Restart=on-failure"));
+    assert!(service.contains("RestartSec=2s"));
     assert!(service.contains("Type=notify"));
     assert!(service.contains("NotifyAccess=main"));
     assert!(service.contains("TimeoutStartSec=45s"));
-    assert!(service.contains("ExecReload=kill -HUP $MAINPID"));
+    assert!(service.contains("ExecReload=/usr/bin/kill -HUP $MAINPID"));
+}
+
+#[test]
+fn packaging_and_spec_standardize_on_system_paths() {
+    let spec = include_str!("../packaging/edgepad.spec");
+
+    assert!(spec.contains("%{_bindir}/edgepad"));
+    assert!(spec.contains("%{_datadir}/edgepad/edgepad.toml"));
+    assert!(spec.contains("%{_userunitdir}/edgepad.service"));
+    assert!(spec.contains("%{_udevrulesdir}/70-edgepad.rules"));
+    assert!(!spec.contains("/home/vicky"));
+    assert!(!spec.contains("%h/.local/bin"));
+
+    let desktop = include_str!("../packaging/org.edgepad.Edgepad.desktop");
+    assert!(desktop.contains("Exec=edgepad gui"));
+    assert!(!desktop.contains("/home/vicky"));
+}
+
+#[test]
+fn packaging_rpm_verifies_packaged_files_and_no_developer_paths() {
+    let rpm_matches = glob_rpm_files();
+    if let Some(rpm_path) = rpm_matches.first() {
+        let output = std::process::Command::new("rpm")
+            .args(["-qlp", &rpm_path.display().to_string()])
+            .output();
+        if let Ok(out) = output {
+            let files = String::from_utf8_lossy(&out.stdout);
+            assert!(files.contains("/usr/bin/edgepad"));
+            assert!(files.contains("/usr/lib/systemd/user/edgepad.service"));
+            assert!(files.contains("/usr/lib/udev/rules.d/70-edgepad.rules"));
+            assert!(files.contains("/usr/share/applications/org.edgepad.Edgepad.desktop"));
+            assert!(files.contains("/usr/share/edgepad/edgepad.toml"));
+            assert!(files.contains("/usr/share/edgepad/gui/main.py"));
+            assert!(
+                !files.contains("/home/vicky"),
+                "RPM must not contain developer paths"
+            );
+        }
+    }
+}
+
+fn glob_rpm_files() -> Vec<std::path::PathBuf> {
+    let dir = std::path::Path::new("rpmbuild/RPMS");
+    let mut results = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                if let Ok(sub) = std::fs::read_dir(&p) {
+                    for s in sub.flatten() {
+                        let sp = s.path();
+                        if sp.extension().map(|e| e == "rpm").unwrap_or(false) {
+                            results.push(sp);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results
 }
 
 #[test]

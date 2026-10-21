@@ -24,45 +24,109 @@ class ServiceManager:
         self.service_file_path = self.user_systemd_dir / self.SERVICE_NAME
 
     def find_edgepad_binary(self) -> str:
-        """Finds the most suitable edgepad binary path."""
-        # 1. PATH lookup
+        """Finds the most suitable edgepad binary path without hardcoded user directories."""
+        # 1. Package-installed location (/usr/bin/edgepad)
+        usr_bin = Path("/usr/bin/edgepad")
+        if usr_bin.exists() and os.access(usr_bin, os.X_OK):
+            return str(usr_bin)
+
+        # 2. PATH lookup
         which = shutil.which("edgepad")
         if which:
             return which
 
-        # 2. ~/.local/bin/edgepad
+        # 3. User-local location (~/.local/bin/edgepad)
         local_bin = Path.home() / ".local" / "bin" / "edgepad"
-        if local_bin.exists():
+        if local_bin.exists() and os.access(local_bin, os.X_OK):
             return str(local_bin)
 
-        # 3. /usr/bin/edgepad
-        usr_bin = Path("/usr/bin/edgepad")
-        if usr_bin.exists():
-            return str(usr_bin)
-
-        # 4. Workspace build target
-        workspace_target = Path("/home/vicky/Downloads/linux-projects/edgepad-main/target/debug/edgepad")
-        if workspace_target.exists():
-            return str(workspace_target)
+        # 4. Repo workspace target (release then debug)
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        for sub in ["release", "debug"]:
+            target_bin = repo_root / "target" / sub / "edgepad"
+            if target_bin.exists() and os.access(target_bin, os.X_OK):
+                return str(target_bin)
 
         return "edgepad"
 
     def is_unit_installed(self) -> bool:
-        """Checks if edgepad.service unit file exists."""
+        """Checks if edgepad.service unit file exists in system or user location."""
         if self.service_file_path.exists():
             return True
         sys_unit = Path("/usr/lib/systemd/user") / self.SERVICE_NAME
         return sys_unit.exists()
 
-    def ensure_service_installed(self) -> tuple[bool, str]:
-        """Installs user-level systemd service file if not present."""
-        if self.is_unit_installed():
-            return True, "Service unit already installed"
-
+    def detect_legacy_unit(self) -> tuple[bool, str]:
+        """Detects if a user-level override unit exists and whether it references invalid/legacy paths."""
+        if not self.service_file_path.exists():
+            return False, ""
         try:
-            self.user_systemd_dir.mkdir(parents=True, exist_ok=True)
+            content = self.service_file_path.read_text(encoding="utf-8")
+        except Exception as e:
+            return False, f"Could not read user service: {e}"
+
+        reasons = []
+        if "/home/vicky" in content:
+            reasons.append("References hardcoded developer path '/home/vicky'")
+        if "%h/.local/bin/edgepad" in content:
+            local_bin = Path.home() / ".local" / "bin" / "edgepad"
+            if not local_bin.exists():
+                reasons.append("References '%h/.local/bin/edgepad' which does not exist")
+
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith("ExecStart="):
+                exec_cmd = line[len("ExecStart="):].strip()
+                exec_bin = exec_cmd.split()[0] if exec_cmd else ""
+                expanded_bin = exec_bin.replace("%h", str(Path.home()))
+                if not Path(expanded_bin).exists() and not shutil.which(expanded_bin):
+                    reasons.append(f"ExecStart binary '{exec_bin}' does not exist (causes status 203/EXEC)")
+                break
+
+        system_unit = Path("/usr/lib/systemd/user") / self.SERVICE_NAME
+        if system_unit.exists() and reasons:
+            return True, "; ".join(reasons)
+        elif reasons:
+            return True, "; ".join(reasons)
+
+        return False, ""
+
+    def repair_service(self) -> tuple[bool, str]:
+        """Repairs or migrates legacy/broken user units to restore daemon operation."""
+        is_legacy, reason = self.detect_legacy_unit()
+        system_unit = Path("/usr/lib/systemd/user") / self.SERVICE_NAME
+
+        if self.service_file_path.exists():
+            if is_legacy or system_unit.exists():
+                import time
+                backup_path = self.service_file_path.with_suffix(f".service.bak.{int(time.time())}")
+                try:
+                    shutil.copy2(self.service_file_path, backup_path)
+                    self.service_file_path.unlink()
+                except Exception as e:
+                    return False, f"Failed to migrate legacy unit file: {e}"
+
+        if not system_unit.exists() and not self.service_file_path.exists():
             bin_path = self.find_edgepad_binary()
-            service_content = f"""[Unit]
+            if not Path(bin_path).exists() and not shutil.which(bin_path):
+                return False, f"Cannot create service: executable '{bin_path}' not found"
+            try:
+                self.write_canonical_user_unit(bin_path)
+            except Exception as e:
+                return False, f"Failed to write service unit: {e}"
+
+        # Clear failed state and reload
+        self.run_systemctl(["reset-failed", self.SERVICE_NAME])
+        self.run_systemctl(["daemon-reload"])
+
+        return True, "Service definition repaired and reloaded"
+
+    def write_canonical_user_unit(self, bin_path: str) -> None:
+        """Writes canonical systemd user service pointing to a verified executable."""
+        self.user_systemd_dir.mkdir(parents=True, exist_ok=True)
+        if bin_path.startswith(str(Path.home())):
+            bin_path = bin_path.replace(str(Path.home()), "%h", 1)
+        service_content = f"""[Unit]
 Description=edgepad touchpad edge gesture daemon
 Documentation=https://github.com/assembledev/edgepad
 
@@ -70,17 +134,30 @@ Documentation=https://github.com/assembledev/edgepad
 Type=notify
 NotifyAccess=main
 TimeoutStartSec=45s
-ExecStart={bin_path} daemon --config %h/.config/edgepad/edgepad.toml
-ExecReload=kill -HUP $MAINPID
+ExecStart={bin_path} daemon
+ExecReload=/usr/bin/kill -HUP $MAINPID
 Restart=on-failure
-RestartSec=1s
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+RestartSec=2s
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target
 """
-            self.service_file_path.write_text(service_content, encoding="utf-8")
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
+        self.service_file_path.write_text(service_content, encoding="utf-8")
+
+    def ensure_service_installed(self) -> tuple[bool, str]:
+        """Installs user-level systemd service file if not present or repairs legacy unit."""
+        is_legacy, _ = self.detect_legacy_unit()
+        if is_legacy:
+            return self.repair_service()
+
+        if self.is_unit_installed():
+            return True, "Service unit already installed"
+
+        try:
+            bin_path = self.find_edgepad_binary()
+            self.write_canonical_user_unit(bin_path)
+            self.run_systemctl(["daemon-reload"])
             return True, "Service unit installed successfully"
         except Exception as e:
             return False, f"Failed to install service unit: {e}"

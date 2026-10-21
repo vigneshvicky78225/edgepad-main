@@ -34,6 +34,8 @@ echo "==> Creating source tarball edgepad-${VERSION}.tar.gz..."
 tar --exclude-vcs \
     --exclude='./target' \
     --exclude='./rpmbuild' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
     -czf "${RPMBUILD_DIR}/SOURCES/edgepad-${VERSION}.tar.gz" \
     --transform "s,^\.,edgepad-${VERSION}," .
 

@@ -14,8 +14,8 @@ use std::sync::{
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::core::{
-    Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, ResyncContact,
-    SliderDirection, SliderSpec, SliderStep, SlotPosition, Zone,
+    Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureCancellation,
+    GestureDirection, ResyncContact, SliderDirection, SliderSpec, SliderStep, SlotPosition, Zone,
 };
 #[cfg(test)]
 use crate::core::{Event, SliderAxis, ZoneSet};
@@ -291,6 +291,8 @@ pub trait GestureHandler {
     fn handle_gesture(&mut self, gesture: Gesture);
 
     fn handle_slider_step(&mut self, _step: SliderStep) {}
+
+    fn handle_cancellation(&mut self, _cancellation: GestureCancellation) {}
 
     fn take_recognition_config_reload(&mut self) -> Option<ProxyRecognitionConfig> {
         None
@@ -1022,6 +1024,9 @@ where
         stats.slider_steps.push(step);
         handler.handle_slider_step(step);
     }
+    for cancel in routed.cancellations.iter().copied() {
+        handler.handle_cancellation(cancel);
+    }
 
     let output_frame = composer
         .compose_frame(&routed)
@@ -1732,6 +1737,7 @@ mod tests {
     struct RecordingGestureHandler {
         gestures: Vec<Gesture>,
         slider_steps: Vec<SliderStep>,
+        cancellations: Vec<GestureCancellation>,
     }
 
     impl GestureHandler for RecordingGestureHandler {
@@ -1741,6 +1747,10 @@ mod tests {
 
         fn handle_slider_step(&mut self, step: SliderStep) {
             self.slider_steps.push(step);
+        }
+
+        fn handle_cancellation(&mut self, cancellation: GestureCancellation) {
+            self.cancellations.push(cancellation);
         }
     }
 

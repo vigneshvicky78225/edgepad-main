@@ -59,7 +59,7 @@ fn parses_left_edge_swipe_fixture_into_frames() {
                     Event::y(300),
                 ]
             ),
-            frame(50000, vec![Event::slot(0), Event::x(220), Event::y(310)]),
+            frame(50000, vec![Event::slot(0), Event::x(80), Event::y(310)]),
             frame(100000, vec![Event::slot(0), Event::tracking_id(-1)]),
         ]
     );

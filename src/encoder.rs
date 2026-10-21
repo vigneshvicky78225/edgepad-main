@@ -5,8 +5,8 @@
 //! key presses, behaving like a rotary encoder hardware knob rather than a
 //! one-shot swipe.
 
+use crate::core::{AxisRange, SliderAxis, SliderDirection, Zone};
 use std::time::Duration;
-use crate::core::{AxisRange, SliderDirection, Zone};
 
 pub const DEFAULT_ENCODER_STEP_SIZE: f32 = 50.0;
 pub const DEFAULT_ENCODER_DEAD_ZONE: f32 = 10.0;
@@ -57,7 +57,10 @@ impl EncoderConfig {
         }
 
         let millis = self.repeat_interval.as_millis() as u64;
-        let clamped = millis.clamp(MIN_ENCODER_REPEAT_INTERVAL_MS, MAX_ENCODER_REPEAT_INTERVAL_MS);
+        let clamped = millis.clamp(
+            MIN_ENCODER_REPEAT_INTERVAL_MS,
+            MAX_ENCODER_REPEAT_INTERVAL_MS,
+        );
         self.repeat_interval = Duration::from_millis(clamped);
     }
 
@@ -109,15 +112,18 @@ pub struct EncoderStats {
 #[derive(Debug, Clone)]
 pub struct EncoderAccumulator {
     config: EncoderConfig,
-    y_range: AxisRange,
+    axis: SliderAxis,
+    range: AxisRange,
     zone: Zone,
     slot: i32,
     tracking_id: i32,
     active: bool,
-    start_y: Option<f32>,
-    last_y: Option<f32>,
+    start_pos: Option<f32>,
+    last_pos: Option<f32>,
     dead_zone_passed: bool,
-    /// Signed remainder in coordinate units: positive = UP, negative = DOWN.
+    /// Signed remainder in coordinate units:
+    /// - For vertical: positive = UP, negative = DOWN
+    /// - For horizontal: positive = RIGHT, negative = LEFT
     remainder: f32,
     total_travel: f32,
     total_ticks: usize,
@@ -125,16 +131,26 @@ pub struct EncoderAccumulator {
 }
 
 impl EncoderAccumulator {
+    /// Create a new vertical encoder accumulator for left or right edges.
     pub fn new(config: EncoderConfig, y_range: AxisRange) -> Self {
+        Self::with_axis(config, SliderAxis::Vertical, y_range)
+    }
+
+    /// Create a new encoder accumulator with an explicit tracking axis.
+    ///
+    /// - `SliderAxis::Vertical` for left/right edge gestures (Y axis, Up/Down ticks).
+    /// - `SliderAxis::Horizontal` for top/bottom edge gestures (X axis, Right/Left ticks).
+    pub fn with_axis(config: EncoderConfig, axis: SliderAxis, range: AxisRange) -> Self {
         Self {
             config,
-            y_range,
+            axis,
+            range,
             zone: Zone::Right,
             slot: 0,
             tracking_id: 0,
             active: false,
-            start_y: None,
-            last_y: None,
+            start_pos: None,
+            last_pos: None,
             dead_zone_passed: false,
             remainder: 0.0,
             total_travel: 0.0,
@@ -143,13 +159,13 @@ impl EncoderAccumulator {
         }
     }
 
-    pub fn start_contact(&mut self, zone: Zone, slot: i32, tracking_id: i32, y: i32) {
+    pub fn start_contact(&mut self, zone: Zone, slot: i32, tracking_id: i32, pos: i32) {
         self.zone = zone;
         self.slot = slot;
         self.tracking_id = tracking_id;
         self.active = true;
-        self.start_y = Some(y as f32);
-        self.last_y = Some(y as f32);
+        self.start_pos = Some(pos as f32);
+        self.last_pos = Some(pos as f32);
         self.dead_zone_passed = false;
         self.remainder = 0.0;
         self.total_travel = 0.0;
@@ -157,75 +173,85 @@ impl EncoderAccumulator {
         self.last_direction = None;
     }
 
-    /// Process a new vertical coordinate event.
+    /// Process a new coordinate event along the encoder's axis.
+    ///
+    /// - For vertical: `pos` is Y coordinate.
+    /// - For horizontal: `pos` is X coordinate.
     ///
     /// Returns a list of discrete ticks generated during this movement increment.
-    pub fn update(&mut self, y: i32) -> Vec<EncoderTick> {
+    pub fn update(&mut self, pos: i32) -> Vec<EncoderTick> {
         if !self.active || !self.config.enabled {
             return Vec::new();
         }
 
-        let Some(last) = self.last_y else {
+        let Some(last) = self.last_pos else {
             // First event: establishes initial touch point.
             // Never counts initial finger-down as a movement tick.
-            self.start_y = Some(y as f32);
-            self.last_y = Some(y as f32);
+            self.start_pos = Some(pos as f32);
+            self.last_pos = Some(pos as f32);
             return Vec::new();
         };
 
-        let current_y = y as f32;
-        // In Linux touchpads, Y increases downwards (0 = top, max = bottom).
-        // Decreasing Y means moving UP; increasing Y means moving DOWN.
-        // Therefore, (last - current_y) is POSITIVE when moving UP, and NEGATIVE when moving DOWN.
-        let raw_delta = last - current_y;
+        let current_pos = pos as f32;
+        // In Linux touchpads:
+        // - Y increases downwards: (last - current) is POSITIVE when moving UP, NEGATIVE when moving DOWN.
+        // - X increases rightwards: (current - last) is POSITIVE when moving RIGHT, NEGATIVE when moving LEFT.
+        let raw_delta = match self.axis {
+            SliderAxis::Vertical => last - current_pos,
+            SliderAxis::Horizontal => current_pos - last,
+        };
 
         // Ignore stationary events (zero delta).
         if raw_delta == 0.0 {
             return Vec::new();
         }
 
-        let dead_zone = self.config.effective_dead_zone(self.y_range);
-        let step_size = self.config.effective_step_size(self.y_range);
+        let dead_zone = self.config.effective_dead_zone(self.range);
+        let step_size = self.config.effective_step_size(self.range);
 
         // Check if dead zone has been crossed from the initial contact point.
         if !self.dead_zone_passed {
-            let start = self.start_y.unwrap_or(last);
-            let total_disp_from_start = (start - current_y).abs();
+            let start = self.start_pos.unwrap_or(last);
+            let total_disp_from_start = (start - current_pos).abs();
             if total_disp_from_start < dead_zone {
                 // Still inside dead zone: ignore sensor jitter.
-                self.last_y = Some(current_y);
+                self.last_pos = Some(current_pos);
                 return Vec::new();
             }
             self.dead_zone_passed = true;
         }
 
-        self.last_y = Some(current_y);
+        self.last_pos = Some(current_pos);
         self.total_travel += raw_delta.abs();
         self.remainder += raw_delta;
 
         let mut ticks = Vec::new();
+        let (pos_dir, neg_dir) = match self.axis {
+            SliderAxis::Vertical => (SliderDirection::Up, SliderDirection::Down),
+            SliderAxis::Horizontal => (SliderDirection::Right, SliderDirection::Left),
+        };
 
-        // Moving UP: remainder >= step_size
+        // Positive delta: UP (vertical) or RIGHT (horizontal)
         while self.remainder >= step_size {
             self.remainder -= step_size;
             self.total_ticks += 1;
-            self.last_direction = Some(SliderDirection::Up);
+            self.last_direction = Some(pos_dir);
             ticks.push(EncoderTick {
                 zone: self.zone,
-                direction: SliderDirection::Up,
+                direction: pos_dir,
                 slot: self.slot,
                 tracking_id: self.tracking_id,
             });
         }
 
-        // Moving DOWN: remainder <= -step_size
+        // Negative delta: DOWN (vertical) or LEFT (horizontal)
         while self.remainder <= -step_size {
             self.remainder += step_size;
             self.total_ticks += 1;
-            self.last_direction = Some(SliderDirection::Down);
+            self.last_direction = Some(neg_dir);
             ticks.push(EncoderTick {
                 zone: self.zone,
-                direction: SliderDirection::Down,
+                direction: neg_dir,
                 slot: self.slot,
                 tracking_id: self.tracking_id,
             });
@@ -237,8 +263,8 @@ impl EncoderAccumulator {
     /// Reset accumulator state when a touch contact ends.
     pub fn reset(&mut self) {
         self.active = false;
-        self.start_y = None;
-        self.last_y = None;
+        self.start_pos = None;
+        self.last_pos = None;
         self.dead_zone_passed = false;
         self.remainder = 0.0;
         self.total_travel = 0.0;
@@ -583,5 +609,28 @@ mod tests {
         let out2 = engine.process_frame(&f2).unwrap();
         assert!(out2.slider_steps.is_empty());
         assert!(!out2.passthrough.is_empty());
+    }
+
+    #[test]
+    fn horizontal_accumulator_emits_right_and_left_ticks() {
+        let mut acc = EncoderAccumulator::with_axis(
+            test_config(50.0, 0.0),
+            SliderAxis::Horizontal,
+            test_range(),
+        );
+        acc.start_contact(Zone::Top, 0, 1, 200);
+
+        // Move right 100 units (200 -> 300) -> 2 Right ticks
+        let ticks = acc.update(300);
+        assert_eq!(ticks.len(), 2);
+        assert_eq!(ticks[0].direction, SliderDirection::Right);
+        assert_eq!(ticks[0].zone, Zone::Top);
+        assert_eq!(ticks[1].direction, SliderDirection::Right);
+
+        // Move left 50 units (300 -> 250) -> 1 Left tick
+        let ticks = acc.update(250);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].direction, SliderDirection::Left);
+        assert_eq!(ticks[0].zone, Zone::Top);
     }
 }

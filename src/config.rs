@@ -24,21 +24,103 @@ use crate::keyboard::{key_code_to_name, parse_key_code};
 
 pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
 pub const DEFAULT_SLIDER_STEP: f32 = 0.04;
+pub const DEFAULT_CONFIG_SWIPE_MAX_DRIFT: f32 = 0.0413;
 pub use crate::core::{
-    DEFAULT_DOUBLE_TAP_MAX_DISTANCE, DEFAULT_DOUBLE_TAP_TIMEOUT_MS, DEFAULT_SWIPE_MIN_DISTANCE,
-    DEFAULT_TAP_MAX_DURATION_MS, DEFAULT_TAP_MIN_DURATION_MS,
+    DEFAULT_CORNER_HEIGHT, DEFAULT_CORNER_HITBOX, DEFAULT_CORNER_WIDTH,
+    DEFAULT_DOUBLE_TAP_MAX_DISTANCE, DEFAULT_DOUBLE_TAP_TIMEOUT_MS, DEFAULT_SWIPE_MAX_DRIFT,
+    DEFAULT_SWIPE_MIN_DISTANCE, DEFAULT_TAP_MAX_DURATION_MS, DEFAULT_TAP_MAX_MOVEMENT,
+    DEFAULT_TAP_MIN_DURATION_MS, MAX_CORNER_DIMENSION, MIN_CORNER_DIMENSION,
 };
+pub const MIN_CORNER_HITBOX: f32 = MIN_CORNER_DIMENSION;
+pub const MAX_CORNER_HITBOX: f32 = MAX_CORNER_DIMENSION;
+
+/// Physical detection geometry calibration: controls WHERE a touch occurs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HitboxConfig {
+    pub edge_width: f32,
+    pub left_edge_width: Option<f32>,
+    pub right_edge_width: Option<f32>,
+    pub top_edge_height: Option<f32>,
+    pub bottom_edge_height: Option<f32>,
+    pub corner_width: f32,
+    pub corner_height: f32,
+}
+
+impl Default for HitboxConfig {
+    fn default() -> Self {
+        Self {
+            edge_width: DEFAULT_EDGE_WIDTH,
+            left_edge_width: None,
+            right_edge_width: None,
+            top_edge_height: None,
+            bottom_edge_height: None,
+            corner_width: DEFAULT_CORNER_WIDTH,
+            corner_height: DEFAULT_CORNER_HEIGHT,
+        }
+    }
+}
+
+impl HitboxConfig {
+    pub fn resolved_edge_widths(&self) -> EdgeWidths {
+        EdgeWidths {
+            left: self.left_edge_width.unwrap_or(self.edge_width),
+            right: self.right_edge_width.unwrap_or(self.edge_width),
+            top: self.top_edge_height.unwrap_or(self.edge_width),
+            bottom: self.bottom_edge_height.unwrap_or(self.edge_width),
+        }
+    }
+
+    pub fn resolved_corner_dimensions(&self) -> (f32, f32) {
+        (self.corner_width, self.corner_height)
+    }
+}
+
+/// Gesture recognition and movement behavior calibration: controls HOW touch input is interpreted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GestureConfig {
+    pub tap_min_duration_ms: u64,
+    pub tap_max_duration_ms: u64,
+    pub tap_max_movement: f32,
+    pub double_tap_timeout_ms: u64,
+    pub double_tap_max_distance: f32,
+    pub swipe_min_distance: f32,
+    pub swipe_max_drift: f32,
+    pub cooldown_ms: u64,
+}
+
+impl Default for GestureConfig {
+    fn default() -> Self {
+        Self {
+            tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
+            tap_max_duration_ms: DEFAULT_TAP_MAX_DURATION_MS,
+            tap_max_movement: DEFAULT_TAP_MAX_MOVEMENT,
+            double_tap_timeout_ms: DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
+            double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
+            swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
+            swipe_max_drift: DEFAULT_CONFIG_SWIPE_MAX_DRIFT,
+            cooldown_ms: 250,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgepadConfig {
     pub device: DeviceConfig,
+    pub hitbox: HitboxConfig,
+    pub gesture: GestureConfig,
+    // Mirrored fields for direct field access and backward compatibility:
     pub edge_width: f32,
     pub edge_width_overrides: EdgeWidthOverrides,
     pub tap_min_duration_ms: u64,
     pub tap_max_duration_ms: u64,
+    pub tap_max_movement: f32,
     pub double_tap_timeout_ms: u64,
     pub double_tap_max_distance: f32,
     pub swipe_min_distance: f32,
+    pub swipe_max_drift: f32,
+    pub corner_hitbox: f32,
+    pub corner_width: f32,
+    pub corner_height: f32,
     pub encoder: crate::encoder::EncoderConfig,
     pub gestures: Vec<GestureBindingConfig>,
     pub sliders: Vec<SliderBindingConfig>,
@@ -54,23 +136,62 @@ pub struct EdgeWidthOverrides {
 
 impl Default for EdgepadConfig {
     fn default() -> Self {
+        let hitbox = HitboxConfig::default();
+        let gesture = GestureConfig::default();
         Self {
             device: DeviceConfig::Auto,
-            edge_width: DEFAULT_EDGE_WIDTH,
+            edge_width: hitbox.edge_width,
             edge_width_overrides: EdgeWidthOverrides::default(),
-            tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
-            tap_max_duration_ms: DEFAULT_TAP_MAX_DURATION_MS,
-            double_tap_timeout_ms: DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
-            double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
-            swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
+            tap_min_duration_ms: gesture.tap_min_duration_ms,
+            tap_max_duration_ms: gesture.tap_max_duration_ms,
+            tap_max_movement: gesture.tap_max_movement,
+            double_tap_timeout_ms: gesture.double_tap_timeout_ms,
+            double_tap_max_distance: gesture.double_tap_max_distance,
+            swipe_min_distance: gesture.swipe_min_distance,
+            swipe_max_drift: gesture.swipe_max_drift,
+            corner_hitbox: hitbox.corner_width,
+            corner_width: hitbox.corner_width,
+            corner_height: hitbox.corner_height,
             encoder: crate::encoder::EncoderConfig::default(),
             gestures: Vec::new(),
             sliders: Vec::new(),
+            hitbox,
+            gesture,
         }
     }
 }
 
 impl EdgepadConfig {
+    pub fn update_hitbox(&mut self, hitbox: HitboxConfig) {
+        self.hitbox = hitbox;
+        self.edge_width = hitbox.edge_width;
+        self.edge_width_overrides = EdgeWidthOverrides {
+            left: hitbox.left_edge_width,
+            right: hitbox.right_edge_width,
+            top: hitbox.top_edge_height,
+            bottom: hitbox.bottom_edge_height,
+        };
+        self.corner_width = hitbox.corner_width;
+        self.corner_height = hitbox.corner_height;
+        self.corner_hitbox = hitbox.corner_width;
+    }
+
+    pub fn update_gesture(&mut self, gesture: GestureConfig) {
+        self.gesture = gesture;
+        self.tap_min_duration_ms = gesture.tap_min_duration_ms;
+        self.tap_max_duration_ms = gesture.tap_max_duration_ms;
+        self.tap_max_movement = gesture.tap_max_movement;
+        self.double_tap_timeout_ms = gesture.double_tap_timeout_ms;
+        self.double_tap_max_distance = gesture.double_tap_max_distance;
+        self.swipe_min_distance = gesture.swipe_min_distance;
+        self.swipe_max_drift = gesture.swipe_max_drift;
+    }
+
+    pub fn sync_from_subsystems(&mut self) {
+        self.update_hitbox(self.hitbox);
+        self.update_gesture(self.gesture);
+    }
+
     pub fn parse(input: &str) -> Result<Self, String> {
         let raw = toml::from_str::<RawEdgepadConfig>(input)
             .map_err(|err| format!("invalid TOML config: {err}"))?;
@@ -82,40 +203,168 @@ impl EdgepadConfig {
             config.device = DeviceConfig::parse(&device)
                 .map_err(|err| format!("invalid device config: {err}"))?;
         }
-        if let Some(edge_width) = raw.edge_width {
-            config.edge_width = validate_edge_width(edge_width, "edge_width")?;
+
+        // 1. Independent Hitbox Calibration Deserialization
+        let mut hitbox = HitboxConfig::default();
+        if let Some(ref hb) = raw.hitbox {
+            if let Some(w) = hb.edge_width {
+                hitbox.edge_width = validate_edge_width(w, "hitbox.edge_width")?;
+            }
+            hitbox.left_edge_width =
+                validate_optional_edge_width(hb.left_edge_width, "hitbox.left_edge_width")?;
+            hitbox.right_edge_width =
+                validate_optional_edge_width(hb.right_edge_width, "hitbox.right_edge_width")?;
+            hitbox.top_edge_height =
+                validate_optional_edge_width(hb.top_edge_height, "hitbox.top_edge_height")?;
+            hitbox.bottom_edge_height =
+                validate_optional_edge_width(hb.bottom_edge_height, "hitbox.bottom_edge_height")?;
+            if let Some(cw) = hb.corner_width.or(hb.corner_hitbox) {
+                hitbox.corner_width = validate_corner_hitbox(cw, "hitbox.corner_width")?;
+            }
+            if let Some(ch) = hb.corner_height.or(hb.corner_hitbox) {
+                hitbox.corner_height = validate_corner_hitbox(ch, "hitbox.corner_height")?;
+            }
+        } else {
+            // Backward-compatible legacy hitbox fields
+            if let Some(edge_width) = raw.edge_width {
+                hitbox.edge_width = validate_edge_width(edge_width, "edge_width")?;
+            }
+            hitbox.left_edge_width =
+                validate_optional_edge_width(raw.left_edge_width, "left_edge_width")?;
+            hitbox.right_edge_width =
+                validate_optional_edge_width(raw.right_edge_width, "right_edge_width")?;
+            hitbox.top_edge_height =
+                validate_optional_edge_width(raw.top_edge_width, "top_edge_width")?;
+            hitbox.bottom_edge_height =
+                validate_optional_edge_width(raw.bottom_edge_width, "bottom_edge_width")?;
+            if let Some(corner_hitbox) = raw.corner_hitbox {
+                let val = validate_corner_hitbox(corner_hitbox, "corner_hitbox")?;
+                hitbox.corner_width = val;
+                hitbox.corner_height = val;
+            }
         }
-        config.edge_width_overrides = EdgeWidthOverrides {
-            left: validate_optional_edge_width(raw.left_edge_width, "left_edge_width")?,
-            right: validate_optional_edge_width(raw.right_edge_width, "right_edge_width")?,
-            top: validate_optional_edge_width(raw.top_edge_width, "top_edge_width")?,
-            bottom: validate_optional_edge_width(raw.bottom_edge_width, "bottom_edge_width")?,
-        };
-        if let Some(tap_min_duration_ms) = raw.tap_min_duration_ms {
-            config.tap_min_duration_ms =
-                validate_tap_min_duration_ms(tap_min_duration_ms, "tap_min_duration_ms")?;
+        config.update_hitbox(hitbox);
+
+        // 2. Independent Gesture Calibration Deserialization
+        let mut gesture = GestureConfig::default();
+        if let Some(ref g) = raw.gesture {
+            if let Some(tap_min) = g.tap_min_duration_ms {
+                gesture.tap_min_duration_ms =
+                    validate_tap_min_duration_ms(tap_min, "gesture.tap_min_duration_ms")?;
+            }
+            if let Some(tap_max) = g.tap_max_duration_ms {
+                gesture.tap_max_duration_ms =
+                    validate_tap_max_duration_ms(tap_max, "gesture.tap_max_duration_ms")?;
+            }
+            if let Some(tap_mov) = g.tap_max_movement {
+                gesture.tap_max_movement =
+                    validate_tap_max_movement(tap_mov, "gesture.tap_max_movement")?;
+            }
+            if let Some(dt_timeout) = g.double_tap_timeout_ms {
+                gesture.double_tap_timeout_ms =
+                    validate_double_tap_timeout_ms(dt_timeout, "gesture.double_tap_timeout_ms")?;
+            }
+            if let Some(dt_dist) = g.double_tap_max_distance {
+                gesture.double_tap_max_distance =
+                    validate_double_tap_max_distance(dt_dist, "gesture.double_tap_max_distance")?;
+            }
+            if let Some(swipe_dist) = g.swipe_min_distance {
+                gesture.swipe_min_distance =
+                    validate_swipe_min_distance(swipe_dist, "gesture.swipe_min_distance")?;
+            }
+            if let Some(swipe_drift) = g.swipe_max_drift {
+                gesture.swipe_max_drift =
+                    validate_swipe_max_drift(swipe_drift, "gesture.swipe_max_drift")?;
+            }
+            if let Some(cooldown) = g.cooldown_ms {
+                gesture.cooldown_ms = cooldown;
+            }
+        } else {
+            // Backward-compatible legacy gesture fields
+            if let Some(tap_min_duration_ms) = raw.tap_min_duration_ms {
+                gesture.tap_min_duration_ms =
+                    validate_tap_min_duration_ms(tap_min_duration_ms, "tap_min_duration_ms")?;
+            }
+            if let Some(tap_max_duration_ms) = raw.tap_max_duration_ms {
+                gesture.tap_max_duration_ms =
+                    validate_tap_max_duration_ms(tap_max_duration_ms, "tap_max_duration_ms")?;
+            } else if let Some(ref engine) = raw.engine {
+                if let Some(tap_max_dur) = engine.tap_max_duration_ms {
+                    gesture.tap_max_duration_ms =
+                        validate_tap_max_duration_ms(tap_max_dur, "engine.tap_max_duration_ms")?;
+                }
+            }
+            if let Some(double_tap_timeout_ms) = raw.double_tap_timeout_ms {
+                gesture.double_tap_timeout_ms =
+                    validate_double_tap_timeout_ms(double_tap_timeout_ms, "double_tap_timeout_ms")?;
+            }
+            if let Some(double_tap_max_distance) = raw.double_tap_max_distance {
+                gesture.double_tap_max_distance = validate_double_tap_max_distance(
+                    double_tap_max_distance,
+                    "double_tap_max_distance",
+                )?;
+            }
+            if let Some(swipe_min_distance) = raw.swipe_min_distance {
+                gesture.swipe_min_distance =
+                    validate_swipe_min_distance(swipe_min_distance, "swipe_min_distance")?;
+            } else if let Some(ref engine) = raw.engine {
+                if let Some(min_travel) = engine.min_travel {
+                    let dist_frac = if min_travel > 1.0 {
+                        min_travel / 2905.0
+                    } else {
+                        min_travel
+                    };
+                    gesture.swipe_min_distance =
+                        validate_swipe_min_distance(dist_frac, "engine.min_travel")?;
+                }
+            }
+            if let Some(swipe_max_drift) = raw.swipe_max_drift {
+                gesture.swipe_max_drift =
+                    validate_swipe_max_drift(swipe_max_drift, "swipe_max_drift")?;
+            } else if let Some(ref engine) = raw.engine {
+                if let Some(max_drift) = engine.max_drift {
+                    let drift_frac = if max_drift > 1.0 {
+                        max_drift / 2905.0
+                    } else {
+                        max_drift
+                    };
+                    gesture.swipe_max_drift =
+                        validate_swipe_max_drift(drift_frac, "engine.max_drift")?;
+                }
+            }
+            if let Some(ref engine) = raw.engine {
+                if let Some(cooldown) = engine.cooldown_ms {
+                    gesture.cooldown_ms = cooldown;
+                }
+                if let Some(tap_mov) = engine.tap_max_movement {
+                    let mov_frac = if tap_mov > 1.0 {
+                        tap_mov / 2905.0
+                    } else {
+                        tap_mov
+                    };
+                    gesture.tap_max_movement =
+                        validate_tap_max_movement(mov_frac, "engine.tap_max_movement")?;
+                }
+            }
+            if let Some(tap_mov) = raw.tap_max_movement {
+                gesture.tap_max_movement = validate_tap_max_movement(tap_mov, "tap_max_movement")?;
+            } else if raw.gesture.is_none()
+                && raw
+                    .engine
+                    .as_ref()
+                    .and_then(|e| e.tap_max_movement)
+                    .is_none()
+                && raw.swipe_min_distance.is_some()
+            {
+                gesture.tap_max_movement = gesture.swipe_min_distance;
+            }
         }
-        if let Some(tap_max_duration_ms) = raw.tap_max_duration_ms {
-            config.tap_max_duration_ms =
-                validate_tap_max_duration_ms(tap_max_duration_ms, "tap_max_duration_ms")?;
-        }
-        if config.tap_min_duration_ms >= config.tap_max_duration_ms {
+
+        if gesture.tap_min_duration_ms >= gesture.tap_max_duration_ms {
             return Err("tap_min_duration_ms must be < tap_max_duration_ms".to_string());
         }
-        if let Some(double_tap_timeout_ms) = raw.double_tap_timeout_ms {
-            config.double_tap_timeout_ms =
-                validate_double_tap_timeout_ms(double_tap_timeout_ms, "double_tap_timeout_ms")?;
-        }
-        if let Some(double_tap_max_distance) = raw.double_tap_max_distance {
-            config.double_tap_max_distance = validate_double_tap_max_distance(
-                double_tap_max_distance,
-                "double_tap_max_distance",
-            )?;
-        }
-        if let Some(swipe_min_distance) = raw.swipe_min_distance {
-            config.swipe_min_distance =
-                validate_swipe_min_distance(swipe_min_distance, "swipe_min_distance")?;
-        }
+        config.update_gesture(gesture);
+
         if let Some(raw_encoder) = raw.encoder {
             config.encoder.enabled = raw_encoder.enabled.unwrap_or(true);
             if let Some(step) = raw_encoder.step_size {
@@ -170,17 +419,48 @@ impl EdgepadConfig {
     }
 
     pub fn configured_edge_widths(&self) -> EdgeWidths {
-        EdgeWidths {
-            left: self.edge_width_overrides.left.unwrap_or(self.edge_width),
-            right: self.edge_width_overrides.right.unwrap_or(self.edge_width),
-            top: self.edge_width_overrides.top.unwrap_or(self.edge_width),
-            bottom: self.edge_width_overrides.bottom.unwrap_or(self.edge_width),
+        let mut widths = self.hitbox.resolved_edge_widths();
+        if self.edge_width != DEFAULT_EDGE_WIDTH && self.hitbox.edge_width == DEFAULT_EDGE_WIDTH {
+            widths = EdgeWidths::all(self.edge_width);
         }
+        if let Some(left) = self
+            .hitbox
+            .left_edge_width
+            .or(self.edge_width_overrides.left)
+        {
+            widths.left = left;
+        }
+        if let Some(right) = self
+            .hitbox
+            .right_edge_width
+            .or(self.edge_width_overrides.right)
+        {
+            widths.right = right;
+        }
+        if let Some(top) = self
+            .hitbox
+            .top_edge_height
+            .or(self.edge_width_overrides.top)
+        {
+            widths.top = top;
+        }
+        if let Some(bottom) = self
+            .hitbox
+            .bottom_edge_height
+            .or(self.edge_width_overrides.bottom)
+        {
+            widths.bottom = bottom;
+        }
+        widths
     }
 
     pub fn override_edge_width(&mut self, width: f32) {
-        self.edge_width = width;
-        self.edge_width_overrides = EdgeWidthOverrides::default();
+        self.hitbox.edge_width = width;
+        self.hitbox.left_edge_width = None;
+        self.hitbox.right_edge_width = None;
+        self.hitbox.top_edge_height = None;
+        self.hitbox.bottom_edge_height = None;
+        self.sync_from_subsystems();
     }
 
     pub fn to_toml(&self) -> Result<String, String> {
@@ -194,16 +474,39 @@ impl EdgepadConfig {
                 DeviceConfig::Auto => Some("auto".to_string()),
                 DeviceConfig::Path(p) => Some(p.display().to_string()),
             },
-            edge_width: Some(self.edge_width),
-            left_edge_width: self.edge_width_overrides.left,
-            right_edge_width: self.edge_width_overrides.right,
-            top_edge_width: self.edge_width_overrides.top,
-            bottom_edge_width: self.edge_width_overrides.bottom,
-            tap_min_duration_ms: Some(self.tap_min_duration_ms),
-            tap_max_duration_ms: Some(self.tap_max_duration_ms),
-            double_tap_timeout_ms: Some(self.double_tap_timeout_ms),
-            double_tap_max_distance: Some(self.double_tap_max_distance),
-            swipe_min_distance: Some(self.swipe_min_distance),
+            hitbox: Some(RawHitboxConfig {
+                edge_width: Some(self.hitbox.edge_width),
+                left_edge_width: self.hitbox.left_edge_width,
+                right_edge_width: self.hitbox.right_edge_width,
+                top_edge_height: self.hitbox.top_edge_height,
+                bottom_edge_height: self.hitbox.bottom_edge_height,
+                corner_width: Some(self.hitbox.corner_width),
+                corner_height: Some(self.hitbox.corner_height),
+                corner_hitbox: None,
+            }),
+            gesture: Some(RawGestureConfig {
+                swipe_min_distance: Some(self.gesture.swipe_min_distance),
+                swipe_max_drift: Some(self.gesture.swipe_max_drift),
+                tap_max_movement: Some(self.gesture.tap_max_movement),
+                tap_min_duration_ms: Some(self.gesture.tap_min_duration_ms),
+                tap_max_duration_ms: Some(self.gesture.tap_max_duration_ms),
+                double_tap_timeout_ms: Some(self.gesture.double_tap_timeout_ms),
+                double_tap_max_distance: Some(self.gesture.double_tap_max_distance),
+                cooldown_ms: Some(self.gesture.cooldown_ms),
+            }),
+            edge_width: Some(self.hitbox.edge_width),
+            left_edge_width: self.hitbox.left_edge_width,
+            right_edge_width: self.hitbox.right_edge_width,
+            top_edge_width: self.hitbox.top_edge_height,
+            bottom_edge_width: self.hitbox.bottom_edge_height,
+            tap_min_duration_ms: Some(self.gesture.tap_min_duration_ms),
+            tap_max_duration_ms: Some(self.gesture.tap_max_duration_ms),
+            double_tap_timeout_ms: Some(self.gesture.double_tap_timeout_ms),
+            double_tap_max_distance: Some(self.gesture.double_tap_max_distance),
+            swipe_min_distance: Some(self.gesture.swipe_min_distance),
+            swipe_max_drift: Some(self.gesture.swipe_max_drift),
+            corner_hitbox: Some(self.hitbox.corner_width),
+            tap_max_movement: Some(self.gesture.tap_max_movement),
             encoder: Some(RawEncoderConfig {
                 enabled: Some(self.encoder.enabled),
                 step_size: Some(self.encoder.step_size),
@@ -212,74 +515,106 @@ impl EdgepadConfig {
             }),
             gestures: self.gestures.iter().map(|g| g.to_raw()).collect(),
             sliders: self.sliders.iter().map(|s| s.to_raw()).collect(),
+            engine: None,
         }
     }
 
     pub fn default_preset() -> Self {
-        Self {
-            device: DeviceConfig::Auto,
-            edge_width: 0.12,
-            edge_width_overrides: EdgeWidthOverrides::default(),
-            tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
-            tap_max_duration_ms: DEFAULT_TAP_MAX_DURATION_MS,
-            double_tap_timeout_ms: DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
-            double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
-            swipe_min_distance: 0.08,
-            encoder: crate::encoder::EncoderConfig::default(),
-            gestures: vec![
-                GestureBindingConfig {
-                    zone: Zone::Left,
-                    direction: GestureDirection::Up,
-                    action: GestureActionConfig::Key {
-                        key_code: 225,
-                        key_name: "KEY_BRIGHTNESSUP".to_string(),
-                        repeat: 1,
-                    },
-                    name: Some("Brightness Up".to_string()),
-                    enabled: true,
+        let mut config = Self::default();
+        config.hitbox.edge_width = 0.12;
+        config.gesture.swipe_min_distance = 0.08;
+        config.sync_from_subsystems();
+        config.gestures = vec![
+            GestureBindingConfig {
+                zone: Zone::Left,
+                direction: GestureDirection::Up,
+                action: GestureActionConfig::Key {
+                    key_code: 225,
+                    key_name: "KEY_BRIGHTNESSUP".to_string(),
+                    repeat: 1,
                 },
-                GestureBindingConfig {
-                    zone: Zone::Left,
-                    direction: GestureDirection::Down,
-                    action: GestureActionConfig::Key {
-                        key_code: 224,
-                        key_name: "KEY_BRIGHTNESSDOWN".to_string(),
-                        repeat: 1,
-                    },
-                    name: Some("Brightness Down".to_string()),
-                    enabled: true,
+                name: Some("Brightness Up".to_string()),
+                enabled: true,
+            },
+            GestureBindingConfig {
+                zone: Zone::Left,
+                direction: GestureDirection::Down,
+                action: GestureActionConfig::Key {
+                    key_code: 224,
+                    key_name: "KEY_BRIGHTNESSDOWN".to_string(),
+                    repeat: 1,
                 },
-                GestureBindingConfig {
-                    zone: Zone::Right,
-                    direction: GestureDirection::Up,
-                    action: GestureActionConfig::Key {
-                        key_code: 115,
-                        key_name: "KEY_VOLUMEUP".to_string(),
-                        repeat: 1,
-                    },
-                    name: Some("Volume Up".to_string()),
-                    enabled: true,
+                name: Some("Brightness Down".to_string()),
+                enabled: true,
+            },
+            GestureBindingConfig {
+                zone: Zone::Right,
+                direction: GestureDirection::Up,
+                action: GestureActionConfig::Key {
+                    key_code: 115,
+                    key_name: "KEY_VOLUMEUP".to_string(),
+                    repeat: 1,
                 },
-                GestureBindingConfig {
-                    zone: Zone::Right,
-                    direction: GestureDirection::Down,
-                    action: GestureActionConfig::Key {
-                        key_code: 114,
-                        key_name: "KEY_VOLUMEDOWN".to_string(),
-                        repeat: 1,
-                    },
-                    name: Some("Volume Down".to_string()),
-                    enabled: true,
+                name: Some("Volume Up".to_string()),
+                enabled: true,
+            },
+            GestureBindingConfig {
+                zone: Zone::Right,
+                direction: GestureDirection::Down,
+                action: GestureActionConfig::Key {
+                    key_code: 114,
+                    key_name: "KEY_VOLUMEDOWN".to_string(),
+                    repeat: 1,
                 },
-            ],
-            sliders: Vec::new(),
-        }
+                name: Some("Volume Down".to_string()),
+                enabled: true,
+            },
+        ];
+        config.sliders = Vec::new();
+        config
     }
 
     fn active_zone_edge_width(&self, zone: Zone, configured_width: f32) -> f32 {
-        if self.gestures.iter().any(|binding| binding.zone == zone && binding.enabled)
-            || self.sliders.iter().any(|binding| binding.zone == zone && binding.enabled)
-        {
+        let is_active = match zone {
+            Zone::Left => {
+                self.gestures.iter().any(|b| {
+                    matches!(b.zone, Zone::Left | Zone::TopLeft | Zone::BottomLeft) && b.enabled
+                }) || self
+                    .sliders
+                    .iter()
+                    .any(|s| s.zone == Zone::Left && s.enabled)
+            }
+            Zone::Right => {
+                self.gestures.iter().any(|b| {
+                    matches!(b.zone, Zone::Right | Zone::TopRight | Zone::BottomRight) && b.enabled
+                }) || self
+                    .sliders
+                    .iter()
+                    .any(|s| s.zone == Zone::Right && s.enabled)
+            }
+            Zone::Top => {
+                self.gestures.iter().any(|b| {
+                    matches!(b.zone, Zone::Top | Zone::TopLeft | Zone::TopRight) && b.enabled
+                }) || self
+                    .sliders
+                    .iter()
+                    .any(|s| s.zone == Zone::Top && s.enabled)
+            }
+            Zone::Bottom => {
+                self.gestures.iter().any(|b| {
+                    matches!(b.zone, Zone::Bottom | Zone::BottomLeft | Zone::BottomRight)
+                        && b.enabled
+                }) || self
+                    .sliders
+                    .iter()
+                    .any(|s| s.zone == Zone::Bottom && s.enabled)
+            }
+            _ => {
+                self.gestures.iter().any(|b| b.zone == zone && b.enabled)
+                    || self.sliders.iter().any(|s| s.zone == zone && s.enabled)
+            }
+        };
+        if is_active {
             configured_width
         } else {
             0.0
@@ -299,20 +634,44 @@ impl EdgepadConfig {
     }
 
     pub fn engine_options(&self) -> EngineOptions {
+        let mut active = Vec::new();
+        for g in &self.gestures {
+            if g.enabled {
+                active.push(g.zone);
+            }
+        }
+        for s in &self.sliders {
+            if s.enabled {
+                active.push(s.zone);
+            }
+        }
+        let active_zones = ZoneSet::from_zones(active);
+
         EngineOptions {
             tap_min_duration: Duration::from_millis(self.tap_min_duration_ms),
             tap_max_duration: Duration::from_millis(self.tap_max_duration_ms),
+            tap_max_movement: self.tap_max_movement,
             swipe_min_distance: self.swipe_min_distance,
+            swipe_max_drift: self.swipe_max_drift,
             double_tap_timeout: Duration::from_millis(self.double_tap_timeout_ms),
             double_tap_max_distance: self.double_tap_max_distance,
+            corner_hitbox: self.corner_hitbox,
+            corner_width: self.corner_width,
+            corner_height: self.corner_height,
             double_tap_zones: ZoneSet::from_zones(self.gestures.iter().filter_map(|binding| {
                 (binding.enabled && binding.direction == GestureDirection::DoubleTap)
                     .then_some(binding.zone)
             })),
             single_tap_zones: ZoneSet::from_zones(self.gestures.iter().filter_map(|binding| {
-                (binding.enabled && binding.direction == GestureDirection::Tap)
-                    .then_some(binding.zone)
+                (binding.enabled
+                    && binding.direction == GestureDirection::Tap
+                    && !matches!(
+                        binding.zone,
+                        Zone::TopLeft | Zone::TopRight | Zone::BottomLeft | Zone::BottomRight
+                    ))
+                .then_some(binding.zone)
             })),
+            active_zones,
             encoder: self.encoder,
         }
     }
@@ -472,6 +831,14 @@ impl SliderBindingConfig {
         let label = slider_label(index);
         let zone = parse_zone(&raw.zone)
             .ok_or_else(|| format!("{}.zone must be one of: left, right, top, bottom", label))?;
+        if matches!(
+            zone,
+            Zone::TopLeft | Zone::TopRight | Zone::BottomLeft | Zone::BottomRight
+        ) {
+            return Err(format!(
+                "{label}: sliders are only supported on edge zones (left, right, top, bottom)"
+            ));
+        }
         let axis = default_slider_axis(zone);
         let step = match raw.step {
             Some(step) => validate_slider_step(step, &format!("{label}.step"))?,
@@ -534,6 +901,7 @@ impl SliderActionConfig {
             Self::Key {
                 key_name, repeat, ..
             } => RawSliderActionConfig::Key {
+                r#type: None,
                 key: key_name.clone(),
                 repeat: if *repeat > 1 { Some(*repeat) } else { None },
             },
@@ -582,18 +950,40 @@ impl GestureBindingConfig {
     }
 
     pub fn to_raw(&self) -> RawGestureBindingConfig {
+        let (action, key, keys) = match &self.action {
+            GestureActionConfig::Log => {
+                (Some(RawGestureActionConfig::Log { log: true }), None, None)
+            }
+            GestureActionConfig::Command { argv } => (
+                Some(RawGestureActionConfig::Command(argv.clone())),
+                None,
+                None,
+            ),
+            GestureActionConfig::Key {
+                key_name, repeat, ..
+            } if *repeat <= 1 => (None, Some(key_name.clone()), None),
+            GestureActionConfig::Key {
+                key_name, repeat, ..
+            } => (
+                Some(RawGestureActionConfig::Key {
+                    r#type: None,
+                    key: key_name.clone(),
+                    repeat: Some(*repeat),
+                }),
+                None,
+                None,
+            ),
+            GestureActionConfig::KeyCombo { key_names, .. } => {
+                (None, None, Some(key_names.clone()))
+            }
+        };
         RawGestureBindingConfig {
             zone: zone_name(self.zone).to_string(),
             direction: direction_name(self.direction).to_string(),
-            action: Some(match &self.action {
-                GestureActionConfig::Log => RawGestureActionConfig::Log { log: true },
-                GestureActionConfig::Command { argv } => RawGestureActionConfig::Command(argv.clone()),
-                GestureActionConfig::Key { key_name, repeat, .. } => RawGestureActionConfig::Key {
-                    key: key_name.clone(),
-                    repeat: if *repeat > 1 { Some(*repeat) } else { None },
-                },
-            }),
-            key: None,
+            action,
+            key,
+            keys,
+            command: None,
             name: self.name.clone(),
             enabled: if !self.enabled { Some(false) } else { None },
         }
@@ -601,15 +991,27 @@ impl GestureBindingConfig {
 
     fn from_raw(index: usize, raw: RawGestureBindingConfig) -> Result<Self, String> {
         let label = gesture_label(index);
-        let zone = parse_zone(&raw.zone)
-            .ok_or_else(|| format!("{}.zone must be one of: left, right, top, bottom", label))?;
+        let zone = parse_zone(&raw.zone).ok_or_else(|| {
+            format!(
+                "{}.zone must be one of: left, right, top, bottom, top-left, top-right, bottom-left, bottom-right",
+                label
+            )
+        })?;
         let direction = parse_direction(&raw.direction).ok_or_else(|| {
             format!(
                 "{}.direction must be one of: up, down, left, right, tap, double-tap",
                 label
             )
         })?;
-        let action = GestureActionConfig::from_raw(index, raw.action, raw.key)?;
+        if matches!(
+            zone,
+            Zone::TopLeft | Zone::TopRight | Zone::BottomLeft | Zone::BottomRight
+        ) && direction != GestureDirection::DoubleTap
+        {
+            return Err(format!("{label}: corner zones support double-tap only"));
+        }
+        let action =
+            GestureActionConfig::from_raw(index, raw.action, raw.key, raw.keys, raw.command)?;
         let name = raw.name;
         let enabled = raw.enabled.unwrap_or(true);
 
@@ -626,11 +1028,17 @@ impl GestureBindingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GestureActionConfig {
     Log,
-    Command { argv: Vec<String> },
+    Command {
+        argv: Vec<String>,
+    },
     Key {
         key_code: u16,
         key_name: String,
         repeat: u32,
+    },
+    KeyCombo {
+        key_codes: Vec<u16>,
+        key_names: Vec<String>,
     },
 }
 
@@ -639,7 +1047,28 @@ impl GestureActionConfig {
         index: usize,
         raw_action: Option<RawGestureActionConfig>,
         raw_key: Option<String>,
+        raw_keys: Option<Vec<String>>,
+        raw_command: Option<Vec<String>>,
     ) -> Result<Self, String> {
+        if let Some(keys) = raw_keys {
+            if keys.is_empty() {
+                return Err(format!("{}.keys cannot be empty", gesture_label(index)));
+            }
+            let mut key_codes = Vec::with_capacity(keys.len());
+            let mut key_names = Vec::with_capacity(keys.len());
+            for k in &keys {
+                let key_code = parse_key_code(k)
+                    .map_err(|err| format!("{}.keys: {err}", gesture_label(index)))?;
+                let canonical_name = key_code_to_name(key_code);
+                key_codes.push(key_code);
+                key_names.push(canonical_name);
+            }
+            return Ok(Self::KeyCombo {
+                key_codes,
+                key_names,
+            });
+        }
+
         if let Some(key_name) = raw_key {
             let key_code = parse_key_code(&key_name)
                 .map_err(|err| format!("{}.key: {err}", gesture_label(index)))?;
@@ -651,14 +1080,29 @@ impl GestureActionConfig {
             });
         }
 
+        if let Some(argv) = raw_command {
+            return Self::command(argv)
+                .map_err(|err| format!("{}.command: {err}", gesture_label(index)));
+        }
+
         let raw = raw_action.ok_or_else(|| {
             format!(
-                "{}: either 'action' or 'key' is required",
+                "{}: either 'action', 'key', or 'keys' is required",
                 gesture_label(index)
             )
         })?;
 
         match raw {
+            RawGestureActionConfig::LogString(s) => {
+                if s.eq_ignore_ascii_case("log") {
+                    Ok(Self::Log)
+                } else {
+                    Err(format!(
+                        "{}.action string must be 'log', got '{s}'",
+                        gesture_label(index)
+                    ))
+                }
+            }
             RawGestureActionConfig::Command(argv) => {
                 Self::command(argv).map_err(|err| format!("{}.action: {err}", gesture_label(index)))
             }
@@ -666,7 +1110,60 @@ impl GestureActionConfig {
             RawGestureActionConfig::Log { log: false } => {
                 Err(format!("{}.action.log must be true", gesture_label(index)))
             }
-            RawGestureActionConfig::Key { key, repeat } => {
+            RawGestureActionConfig::Media {
+                media_action,
+                key,
+                repeat,
+                ..
+            } => {
+                let resolved_key = key
+                    .or_else(|| {
+                        media_action.as_deref().and_then(|act| match act {
+                            "play_pause" => Some("KEY_PLAYPAUSE".to_string()),
+                            "next" => Some("KEY_NEXTSONG".to_string()),
+                            "previous" => Some("KEY_PREVIOUSSONG".to_string()),
+                            "stop" => Some("KEY_STOPCD".to_string()),
+                            "mute" => Some("KEY_MUTE".to_string()),
+                            _ => None,
+                        })
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "{}.action (media) requires a valid key or media_action",
+                            gesture_label(index)
+                        )
+                    })?;
+                let key_code = parse_key_code(&resolved_key)
+                    .map_err(|err| format!("{}.action.key: {err}", gesture_label(index)))?;
+                let canonical_name = key_code_to_name(key_code);
+                Ok(Self::Key {
+                    key_code,
+                    key_name: canonical_name,
+                    repeat: repeat.unwrap_or(1).max(1),
+                })
+            }
+            RawGestureActionConfig::Shortcut { keys, .. } => {
+                if keys.is_empty() {
+                    return Err(format!(
+                        "{}.action.keys cannot be empty",
+                        gesture_label(index)
+                    ));
+                }
+                let mut key_codes = Vec::with_capacity(keys.len());
+                let mut key_names = Vec::with_capacity(keys.len());
+                for k in &keys {
+                    let key_code = parse_key_code(k)
+                        .map_err(|err| format!("{}.action.keys: {err}", gesture_label(index)))?;
+                    let canonical_name = key_code_to_name(key_code);
+                    key_codes.push(key_code);
+                    key_names.push(canonical_name);
+                }
+                Ok(Self::KeyCombo {
+                    key_codes,
+                    key_names,
+                })
+            }
+            RawGestureActionConfig::Key { key, repeat, .. } => {
                 let key_code = parse_key_code(&key)
                     .map_err(|err| format!("{}.action.key: {err}", gesture_label(index)))?;
                 let canonical_name = key_code_to_name(key_code);
@@ -796,6 +1293,29 @@ fn validate_swipe_min_distance(parsed: f32, name: &str) -> Result<f32, String> {
     Ok(parsed)
 }
 
+fn validate_swipe_max_drift(parsed: f32, name: &str) -> Result<f32, String> {
+    if !(parsed > 0.0 && parsed <= 1.0) {
+        return Err(format!("{name} must be > 0 and <= 1"));
+    }
+    Ok(parsed)
+}
+
+fn validate_tap_max_movement(parsed: f32, name: &str) -> Result<f32, String> {
+    if !parsed.is_finite() || parsed <= 0.0 || parsed > 1.0 {
+        return Err(format!("{name} must be > 0 and <= 1"));
+    }
+    Ok(parsed)
+}
+
+fn validate_corner_hitbox(parsed: f32, name: &str) -> Result<f32, String> {
+    if !parsed.is_finite() || parsed < MIN_CORNER_HITBOX || parsed > MAX_CORNER_HITBOX {
+        return Err(format!(
+            "{name} must be between {MIN_CORNER_HITBOX} and {MAX_CORNER_HITBOX}"
+        ));
+    }
+    Ok(parsed)
+}
+
 fn resolve_auto_touchpad(input_root: &Path) -> Result<PathBuf, String> {
     let report = discover_device_report(input_root)
         .map_err(|err| format!("failed to list {}: {err}", input_root.display()))?;
@@ -849,6 +1369,10 @@ fn parse_zone(raw: &str) -> Option<Zone> {
         "right" => Some(Zone::Right),
         "top" => Some(Zone::Top),
         "bottom" => Some(Zone::Bottom),
+        "top-left" | "top_left" => Some(Zone::TopLeft),
+        "top-right" | "top_right" => Some(Zone::TopRight),
+        "bottom-left" | "bottom_left" => Some(Zone::BottomLeft),
+        "bottom-right" | "bottom_right" => Some(Zone::BottomRight),
         _ => None,
     }
 }
@@ -871,6 +1395,10 @@ fn zone_name(zone: Zone) -> &'static str {
         Zone::Right => "right",
         Zone::Top => "top",
         Zone::Bottom => "bottom",
+        Zone::TopLeft => "top-left",
+        Zone::TopRight => "top-right",
+        Zone::BottomLeft => "bottom-left",
+        Zone::BottomRight => "bottom-right",
     }
 }
 
@@ -887,8 +1415,8 @@ fn direction_name(direction: GestureDirection) -> &'static str {
 
 fn default_slider_axis(zone: Zone) -> SliderAxis {
     match zone {
-        Zone::Left | Zone::Right => SliderAxis::Vertical,
-        Zone::Top | Zone::Bottom => SliderAxis::Horizontal,
+        Zone::Left | Zone::Right | Zone::TopLeft | Zone::BottomLeft => SliderAxis::Vertical,
+        Zone::Top | Zone::Bottom | Zone::TopRight | Zone::BottomRight => SliderAxis::Horizontal,
     }
 }
 
@@ -899,8 +1427,8 @@ fn parse_required_slider_action(
     raw_key: Option<String>,
 ) -> Result<SliderActionConfig, String> {
     if let Some(key_name) = raw_key {
-        let key_code = parse_key_code(&key_name)
-            .map_err(|err| format!("{label}.{direction}_key: {err}"))?;
+        let key_code =
+            parse_key_code(&key_name).map_err(|err| format!("{label}.{direction}_key: {err}"))?;
         let canonical_name = key_code_to_name(key_code);
         return Ok(SliderActionConfig::Key {
             key_code,
@@ -911,6 +1439,9 @@ fn parse_required_slider_action(
 
     let action = raw.ok_or_else(|| format!("{label}.{direction} is required"))?;
     match action {
+        RawSliderActionConfig::LogString(s) => Err(format!(
+            "{label}.{direction}: expected command array or key table, got '{s}'"
+        )),
         RawSliderActionConfig::Command(argv) => {
             if argv.is_empty() {
                 return Err(format!(
@@ -919,9 +1450,9 @@ fn parse_required_slider_action(
             }
             Ok(SliderActionConfig::Command(CommandActionConfig { argv }))
         }
-        RawSliderActionConfig::Key { key, repeat } => {
-            let key_code = parse_key_code(&key)
-                .map_err(|err| format!("{label}.{direction}.key: {err}"))?;
+        RawSliderActionConfig::Key { key, repeat, .. } => {
+            let key_code =
+                parse_key_code(&key).map_err(|err| format!("{label}.{direction}.key: {err}"))?;
             let canonical_name = key_code_to_name(key_code);
             Ok(SliderActionConfig::Key {
                 key_code,
@@ -962,10 +1493,54 @@ fn slider_label(index: usize) -> String {
     format!("sliders[{index}]")
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct RawHitboxConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_edge_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_edge_width: Option<f32>,
+    #[serde(alias = "top_edge_width", skip_serializing_if = "Option::is_none")]
+    pub top_edge_height: Option<f32>,
+    #[serde(alias = "bottom_edge_width", skip_serializing_if = "Option::is_none")]
+    pub bottom_edge_height: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_width: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_height: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_hitbox: Option<f32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct RawGestureConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swipe_min_distance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swipe_max_drift: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tap_max_movement: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tap_min_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tap_max_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub double_tap_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub double_tap_max_distance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct RawEdgepadConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hitbox: Option<RawHitboxConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture: Option<RawGestureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_width: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -986,12 +1561,34 @@ pub struct RawEdgepadConfig {
     pub double_tap_max_distance: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub swipe_min_distance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swipe_max_drift: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corner_hitbox: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tap_max_movement: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder: Option<RawEncoderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<RawEngineConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gestures: Vec<RawGestureBindingConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sliders: Vec<RawSliderBindingConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+pub struct RawEngineConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_travel: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_drift: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_max_duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_max_movement: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
@@ -1016,6 +1613,10 @@ pub struct RawGestureBindingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -1024,9 +1625,28 @@ pub struct RawGestureBindingConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum RawGestureActionConfig {
+    LogString(String),
     Command(Vec<String>),
-    Log { log: bool },
+    Log {
+        log: bool,
+    },
+    Shortcut {
+        #[serde(default)]
+        r#type: Option<String>,
+        keys: Vec<String>,
+    },
+    Media {
+        #[serde(default)]
+        r#type: Option<String>,
+        #[serde(default)]
+        media_action: Option<String>,
+        key: Option<String>,
+        #[serde(default)]
+        repeat: Option<u32>,
+    },
     Key {
+        #[serde(default)]
+        r#type: Option<String>,
         key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repeat: Option<u32>,
@@ -1064,8 +1684,11 @@ pub struct RawSliderBindingConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum RawSliderActionConfig {
+    LogString(String),
     Command(Vec<String>),
     Key {
+        #[serde(default)]
+        r#type: Option<String>,
         key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repeat: Option<u32>,

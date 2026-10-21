@@ -4,6 +4,7 @@
 //! when full, so a slow command cannot block touchpad forwarding or grow an
 //! unlimited backlog of slider steps.
 
+use std::collections::HashSet;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -23,7 +24,9 @@ use crate::config::{
 };
 #[cfg(test)]
 use crate::core::SliderAxis;
-use crate::core::{Gesture, GestureDirection, SliderDirection, SliderStep, Zone};
+use crate::core::{
+    Gesture, GestureCancellation, GestureDirection, SliderDirection, SliderStep, Zone,
+};
 use crate::ipc::IpcBroadcaster;
 use crate::keyboard::VirtualKeyboard;
 use crate::proxy::GestureHandler;
@@ -208,6 +211,7 @@ pub struct ActionDispatcher {
     test_mode: Arc<AtomicBool>,
     broadcaster: Option<IpcBroadcaster>,
     repeat_interval_ms: Arc<AtomicU64>,
+    cancelled_contacts: Arc<Mutex<HashSet<(i32, i32)>>>,
 }
 
 impl ActionDispatcher {
@@ -256,20 +260,21 @@ impl ActionDispatcher {
             crate::encoder::DEFAULT_ENCODER_REPEAT_INTERVAL_MS,
         ));
         let worker_repeat_interval_ms = repeat_interval_ms.clone();
+        let cancelled_contacts = Arc::new(Mutex::new(HashSet::new()));
+        let worker_cancelled_contacts = cancelled_contacts.clone();
+
+        let worker_ctx = ActionWorkerContext {
+            stats: worker_stats,
+            shutdown: worker_shutdown,
+            test_mode: worker_test_mode,
+            broadcaster: worker_broadcaster,
+            repeat_interval_ms: worker_repeat_interval_ms,
+            cancelled_contacts: worker_cancelled_contacts,
+        };
 
         let worker = thread::Builder::new()
             .name("edgepad-action-worker".to_string())
-            .spawn(move || {
-                run_action_worker(
-                    receiver,
-                    runner,
-                    worker_stats,
-                    worker_shutdown,
-                    worker_test_mode,
-                    worker_broadcaster,
-                    worker_repeat_interval_ms,
-                )
-            })
+            .spawn(move || run_action_worker(receiver, runner, worker_ctx))
             .map_err(|err| format!("failed to start edgepad action worker: {err}"))?;
 
         Ok(Self {
@@ -282,6 +287,7 @@ impl ActionDispatcher {
             test_mode,
             broadcaster: Some(broadcaster),
             repeat_interval_ms,
+            cancelled_contacts,
         })
     }
 
@@ -318,13 +324,65 @@ impl ActionDispatcher {
     }
 
     pub fn dispatch_gesture(&mut self, gesture: Gesture) {
-        let Some(binding) = self
+        let binding = self
             .bindings
             .iter()
             .find(|binding| binding.matches(&gesture))
-        else {
+            .or_else(|| {
+                // If this is a directional swipe originating in a corner, fall back to adjacent edge
+                if matches!(
+                    gesture.direction,
+                    GestureDirection::Up
+                        | GestureDirection::Down
+                        | GestureDirection::Left
+                        | GestureDirection::Right
+                ) {
+                    let fallback_zone = match (gesture.zone, gesture.direction) {
+                        (Zone::TopLeft, GestureDirection::Up | GestureDirection::Down) => {
+                            Some(Zone::Left)
+                        }
+                        (Zone::TopLeft, GestureDirection::Left | GestureDirection::Right) => {
+                            Some(Zone::Top)
+                        }
+                        (Zone::TopRight, GestureDirection::Up | GestureDirection::Down) => {
+                            Some(Zone::Right)
+                        }
+                        (Zone::TopRight, GestureDirection::Left | GestureDirection::Right) => {
+                            Some(Zone::Top)
+                        }
+                        (Zone::BottomLeft, GestureDirection::Up | GestureDirection::Down) => {
+                            Some(Zone::Left)
+                        }
+                        (Zone::BottomLeft, GestureDirection::Left | GestureDirection::Right) => {
+                            Some(Zone::Bottom)
+                        }
+                        (Zone::BottomRight, GestureDirection::Up | GestureDirection::Down) => {
+                            Some(Zone::Right)
+                        }
+                        (Zone::BottomRight, GestureDirection::Left | GestureDirection::Right) => {
+                            Some(Zone::Bottom)
+                        }
+                        _ => None,
+                    };
+                    fallback_zone.and_then(|fz| {
+                        let fallback_gesture = Gesture {
+                            zone: fz,
+                            ..gesture
+                        };
+                        self.bindings.iter().find(|b| b.matches(&fallback_gesture))
+                    })
+                } else {
+                    None
+                }
+            });
+
+        let Some(binding) = binding else {
             self.stats.increment_unmatched_gestures();
             eprintln!("edgepad action unmatched: {}", gesture_context(gesture));
+            eprintln!(
+                "[EDGEPAD_EVENT] [7/7-FAILURE] No matching configuration rule found for zone {:?} gesture {:?}",
+                gesture.zone, gesture.direction
+            );
             if let Some(ref bcast) = self.broadcaster {
                 let json = format!(
                     r#"{{"event":"unmatched_gesture","zone":"{}","direction":"{}","slot":{},"tracking_id":{}}}"#,
@@ -339,6 +397,10 @@ impl ActionDispatcher {
         };
 
         self.stats.increment_matched_gestures();
+        eprintln!(
+            "[EDGEPAD_EVENT] [4/7-RULE_MATCHED] Rule matched for zone {:?} gesture {:?}: action={:?}",
+            gesture.zone, gesture.direction, binding.action
+        );
         match &binding.action {
             GestureActionConfig::Log => {
                 self.stats.increment_log_actions();
@@ -378,20 +440,26 @@ impl ActionDispatcher {
                     },
                 );
             }
+            GestureActionConfig::KeyCombo {
+                key_codes,
+                key_names,
+            } => {
+                self.enqueue_action_command(
+                    ActionSource::Gesture(gesture),
+                    ActionPayload::KeyCombo {
+                        key_codes: key_codes.clone(),
+                        key_names: key_names.clone(),
+                    },
+                );
+            }
         }
     }
 
     pub fn dispatch_slider_step(&mut self, step: SliderStep) {
         // 1. Check if there is an explicit slider binding configured for this zone & direction
-        if let Some(slider) = self
-            .sliders
-            .iter()
-            .find(|slider| {
-                slider.enabled
-                    && slider.zone == step.zone
-                    && slider.direction_is_valid(step.direction)
-            })
-        {
+        if let Some(slider) = self.sliders.iter().find(|slider| {
+            slider.enabled && slider.zone == step.zone && slider.direction_is_valid(step.direction)
+        }) {
             self.stats.increment_matched_slider_steps();
             match slider.action_for(step.direction) {
                 SliderActionConfig::Command(cmd) => {
@@ -433,9 +501,7 @@ impl ActionDispatcher {
             self.stats.increment_matched_slider_steps();
             match &binding.action {
                 GestureActionConfig::Key {
-                    key_code,
-                    key_name,
-                    ..
+                    key_code, key_name, ..
                 } => {
                     self.enqueue_action_command(
                         ActionSource::SliderStep(step),
@@ -443,6 +509,18 @@ impl ActionDispatcher {
                             key_code: *key_code,
                             key_name: key_name.clone(),
                             repeat: 1,
+                        },
+                    );
+                }
+                GestureActionConfig::KeyCombo {
+                    key_codes,
+                    key_names,
+                } => {
+                    self.enqueue_action_command(
+                        ActionSource::SliderStep(step),
+                        ActionPayload::KeyCombo {
+                            key_codes: key_codes.clone(),
+                            key_names: key_names.clone(),
                         },
                     );
                 }
@@ -477,11 +555,21 @@ impl ActionDispatcher {
         // 3. Fallback to standard hardware defaults:
         // Left edge: Up -> KEY_BRIGHTNESSUP (225), Down -> KEY_BRIGHTNESSDOWN (224)
         // Right edge: Up -> KEY_VOLUMEUP (115), Down -> KEY_VOLUMEDOWN (114)
+        // Top edge: Right -> KEY_NEXTSONG (163), Left -> KEY_PREVIOUSSONG (165)
+        // Bottom edge: Right -> KEY_RIGHT (106), Left -> KEY_LEFT (105)
         let default_key = match (step.zone, step.direction) {
             (Zone::Left, SliderDirection::Up) => Some((225, "KEY_BRIGHTNESSUP")),
             (Zone::Left, SliderDirection::Down) => Some((224, "KEY_BRIGHTNESSDOWN")),
             (Zone::Right, SliderDirection::Up) => Some((115, "KEY_VOLUMEUP")),
             (Zone::Right, SliderDirection::Down) => Some((114, "KEY_VOLUMEDOWN")),
+            (Zone::Top, SliderDirection::Right) => Some((163, "KEY_NEXTSONG")),
+            (Zone::Top, SliderDirection::Left) => Some((165, "KEY_PREVIOUSSONG")),
+            (Zone::Top, SliderDirection::Up) => Some((163, "KEY_NEXTSONG")),
+            (Zone::Top, SliderDirection::Down) => Some((165, "KEY_PREVIOUSSONG")),
+            (Zone::Bottom, SliderDirection::Right) => Some((106, "KEY_RIGHT")),
+            (Zone::Bottom, SliderDirection::Left) => Some((105, "KEY_LEFT")),
+            (Zone::Bottom, SliderDirection::Up) => Some((103, "KEY_UP")),
+            (Zone::Bottom, SliderDirection::Down) => Some((108, "KEY_DOWN")),
             _ => None,
         };
 
@@ -548,6 +636,19 @@ impl ActionDispatcher {
             }
         }
     }
+    pub fn cancel_gesture(&mut self, cancel: GestureCancellation) {
+        self.cancelled_contacts
+            .lock()
+            .unwrap()
+            .insert((cancel.slot, cancel.tracking_id));
+        self.enqueue_action_command(
+            ActionSource::Cancellation(cancel),
+            ActionPayload::CancelContact {
+                slot: cancel.slot,
+                tracking_id: cancel.tracking_id,
+            },
+        );
+    }
 }
 
 impl GestureHandler for ActionDispatcher {
@@ -558,6 +659,10 @@ impl GestureHandler for ActionDispatcher {
     fn handle_slider_step(&mut self, step: SliderStep) {
         self.dispatch_slider_step(step);
     }
+
+    fn handle_cancellation(&mut self, cancel: GestureCancellation) {
+        self.cancel_gesture(cancel);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -567,6 +672,14 @@ pub enum ActionPayload {
         key_code: u16,
         key_name: String,
         repeat: u32,
+    },
+    KeyCombo {
+        key_codes: Vec<u16>,
+        key_names: Vec<String>,
+    },
+    CancelContact {
+        slot: i32,
+        tracking_id: i32,
     },
 }
 
@@ -580,19 +693,52 @@ struct ActionCommand {
 enum ActionSource {
     Gesture(Gesture),
     SliderStep(SliderStep),
+    Cancellation(GestureCancellation),
 }
 
-fn run_action_worker<R>(
-    receiver: Receiver<ActionCommand>,
-    mut runner: R,
+impl ActionSource {
+    pub fn slot(&self) -> i32 {
+        match self {
+            ActionSource::Gesture(g) => g.slot,
+            ActionSource::SliderStep(s) => s.slot,
+            ActionSource::Cancellation(c) => c.slot,
+        }
+    }
+
+    pub fn tracking_id(&self) -> i32 {
+        match self {
+            ActionSource::Gesture(g) => g.tracking_id,
+            ActionSource::SliderStep(s) => s.tracking_id,
+            ActionSource::Cancellation(c) => c.tracking_id,
+        }
+    }
+}
+
+struct ActionWorkerContext {
     stats: SharedActionStats,
     shutdown: ActionShutdownToken,
     test_mode: Arc<AtomicBool>,
     broadcaster: IpcBroadcaster,
     repeat_interval_ms: Arc<AtomicU64>,
+    cancelled_contacts: Arc<Mutex<HashSet<(i32, i32)>>>,
+}
+
+fn run_action_worker<R>(
+    receiver: Receiver<ActionCommand>,
+    mut runner: R,
+    worker_ctx: ActionWorkerContext,
 ) where
     R: ActionCommandRunner,
 {
+    let ActionWorkerContext {
+        stats,
+        shutdown,
+        test_mode,
+        broadcaster,
+        repeat_interval_ms,
+        cancelled_contacts,
+    } = worker_ctx;
+
     let mut keyboard: Option<VirtualKeyboard> = None;
 
     while !shutdown.is_requested() {
@@ -603,27 +749,58 @@ fn run_action_worker<R>(
             break;
         }
 
+        let source_slot = command.source.slot();
+        let source_tracking_id = command.source.tracking_id();
+
+        if let ActionPayload::CancelContact { .. } = &command.payload {
+            if let Some(ref mut kb) = keyboard {
+                let _ = kb.release_all();
+            }
+            continue;
+        }
+
+        if cancelled_contacts
+            .lock()
+            .unwrap()
+            .contains(&(source_slot, source_tracking_id))
+        {
+            stats.increment_dropped_commands();
+            eprintln!(
+                "[EDGEPAD_EVENT] [ACTION_CANCELLED] Dropping queued action for cancelled contact (slot={}, tracking_id={})",
+                source_slot, source_tracking_id
+            );
+            continue;
+        }
+
         let is_test = test_mode.load(Ordering::SeqCst);
         let ctx = action_command_context(&command);
         let (source_type, zone, direction) = match command.source {
-            ActionSource::Gesture(g) => (
-                "gesture",
-                zone_name(g.zone),
-                direction_name(g.direction),
-            ),
+            ActionSource::Gesture(g) => ("gesture", zone_name(g.zone), direction_name(g.direction)),
             ActionSource::SliderStep(s) => (
                 "slider_step",
                 zone_name(s.zone),
                 slider_direction_name(s.direction),
             ),
+            ActionSource::Cancellation(c) => ("cancellation", zone_name(c.zone), "none"),
         };
 
         match &command.payload {
             ActionPayload::Command(argv) => {
                 stats.increment_started_commands();
+                eprintln!(
+                    "[EDGEPAD_EVENT] [5/7-ACTION_DISPATCHED] Dispatching command {:?} for {} (test_mode={})",
+                    argv, ctx, is_test
+                );
                 if is_test {
                     stats.increment_succeeded_commands();
-                    eprintln!("edgepad [TEST MODE] simulated command: {} argv={:?}", ctx, argv);
+                    eprintln!(
+                        "edgepad [TEST MODE] simulated command: {} argv={:?}",
+                        ctx, argv
+                    );
+                    eprintln!(
+                        "[EDGEPAD_EVENT] [6/7-ACTION_EXECUTED] Simulated command {:?} succeeded (test_mode=true)",
+                        argv
+                    );
                     let json = format!(
                         r#"{{"event":"{}","zone":"{}","direction":"{}","action_type":"command","action":{:?},"test_mode":true,"success":true}}"#,
                         source_type, zone, direction, argv
@@ -634,6 +811,10 @@ fn run_action_worker<R>(
                     let success = match result {
                         Ok(status) if status.success => {
                             stats.increment_succeeded_commands();
+                            eprintln!(
+                                "[EDGEPAD_EVENT] [6/7-ACTION_EXECUTED] Command {:?} completed successfully",
+                                argv
+                            );
                             true
                         }
                         Ok(_) => {
@@ -642,6 +823,10 @@ fn run_action_worker<R>(
                                 "edgepad action command exited unsuccessfully: {} argv={:?}",
                                 ctx, argv
                             );
+                            eprintln!(
+                                "[EDGEPAD_EVENT] [7/7-FAILURE] Command {:?} exited with unsuccessful status",
+                                argv
+                            );
                             false
                         }
                         Err(err) => {
@@ -649,6 +834,10 @@ fn run_action_worker<R>(
                             eprintln!(
                                 "edgepad action command failed: {} argv={:?}: {err}",
                                 ctx, argv
+                            );
+                            eprintln!(
+                                "[EDGEPAD_EVENT] [7/7-FAILURE] Command {:?} execution error: {err}",
+                                argv
                             );
                             false
                         }
@@ -666,11 +855,19 @@ fn run_action_worker<R>(
                 repeat,
             } => {
                 stats.increment_started_commands();
+                eprintln!(
+                    "[EDGEPAD_EVENT] [5/7-ACTION_DISPATCHED] Dispatching key {} ({}) repeat={} for {} (test_mode={})",
+                    key_name, key_code, repeat, ctx, is_test
+                );
                 if is_test {
                     stats.increment_succeeded_commands();
                     eprintln!(
                         "edgepad [TEST MODE] simulated key: {} key={} (code {})",
                         ctx, key_name, key_code
+                    );
+                    eprintln!(
+                        "[EDGEPAD_EVENT] [6/7-ACTION_EXECUTED] Simulated key {} (code {}) succeeded (test_mode=true)",
+                        key_name, key_code
                     );
                     let json = format!(
                         r#"{{"event":"{}","zone":"{}","direction":"{}","action_type":"key","key":"{}","key_code":{},"test_mode":true,"success":true}}"#,
@@ -683,6 +880,9 @@ fn run_action_worker<R>(
                             Ok(kb) => keyboard = Some(kb),
                             Err(err) => {
                                 eprintln!("edgepad failed to initialize virtual keyboard: {err}");
+                                eprintln!(
+                                    "[EDGEPAD_EVENT] [7/7-FAILURE] Failed to initialize virtual keyboard: {err}"
+                                );
                             }
                         }
                     }
@@ -701,6 +901,10 @@ fn run_action_worker<R>(
                                     "edgepad failed to emit key {} ({}): {err}",
                                     key_name, key_code
                                 );
+                                eprintln!(
+                                    "[EDGEPAD_EVENT] [7/7-FAILURE] Failed to emit key {} (code {}): {err}",
+                                    key_name, key_code
+                                );
                                 ok = false;
                                 break;
                             }
@@ -710,12 +914,20 @@ fn run_action_worker<R>(
                         }
                         if ok {
                             stats.increment_succeeded_commands();
+                            eprintln!(
+                                "[EDGEPAD_EVENT] [6/7-ACTION_EXECUTED] Virtual key {} (code {}) emitted successfully",
+                                key_name, key_code
+                            );
                         } else {
                             stats.increment_failed_commands();
                         }
                         ok
                     } else {
                         stats.increment_failed_commands();
+                        eprintln!(
+                            "[EDGEPAD_EVENT] [7/7-FAILURE] Cannot emit key {}: virtual keyboard unavailable",
+                            key_name
+                        );
                         false
                     };
 
@@ -726,6 +938,79 @@ fn run_action_worker<R>(
                     broadcaster.broadcast(&json);
                 }
             }
+            ActionPayload::KeyCombo {
+                key_codes,
+                key_names,
+            } => {
+                stats.increment_started_commands();
+                let combo_str = key_names.join(" + ");
+                eprintln!(
+                    "[EDGEPAD_EVENT] [5/7-ACTION_DISPATCHED] Dispatching shortcut {} ({:?}) for {} (test_mode={})",
+                    combo_str, key_codes, ctx, is_test
+                );
+                if is_test {
+                    stats.increment_succeeded_commands();
+                    eprintln!(
+                        "edgepad [TEST MODE] simulated shortcut: {} combo={} (codes {:?})",
+                        ctx, combo_str, key_codes
+                    );
+                    eprintln!(
+                        "[EDGEPAD_EVENT] [6/7-ACTION_EXECUTED] Simulated shortcut {} succeeded (test_mode=true)",
+                        combo_str
+                    );
+                    let json = format!(
+                        r#"{{"event":"{}","zone":"{}","direction":"{}","action_type":"shortcut","shortcut":"{}","keys":{:?},"test_mode":true,"success":true}}"#,
+                        source_type, zone, direction, combo_str, key_names
+                    );
+                    broadcaster.broadcast(&json);
+                } else {
+                    if keyboard.is_none() {
+                        match VirtualKeyboard::new() {
+                            Ok(kb) => keyboard = Some(kb),
+                            Err(err) => {
+                                eprintln!("edgepad failed to initialize virtual keyboard: {err}");
+                                eprintln!(
+                                    "[EDGEPAD_EVENT] [7/7-FAILURE] Failed to initialize virtual keyboard: {err}"
+                                );
+                            }
+                        }
+                    }
+
+                    let hold_dur = Duration::from_millis(20);
+                    let success = if let Some(ref mut kb) = keyboard {
+                        if let Err(err) = kb.emit_combo(key_codes, hold_dur) {
+                            eprintln!("edgepad failed to emit shortcut {}: {err}", combo_str);
+                            eprintln!(
+                                "[EDGEPAD_EVENT] [7/7-FAILURE] Failed to emit shortcut {}: {err}",
+                                combo_str
+                            );
+                            stats.increment_failed_commands();
+                            false
+                        } else {
+                            stats.increment_succeeded_commands();
+                            eprintln!(
+                                "[EDGEPAD_EVENT] [6/7-ACTION_EXECUTED] Virtual shortcut {} emitted successfully",
+                                combo_str
+                            );
+                            true
+                        }
+                    } else {
+                        stats.increment_failed_commands();
+                        eprintln!(
+                            "[EDGEPAD_EVENT] [7/7-FAILURE] Cannot emit shortcut {}: virtual keyboard unavailable",
+                            combo_str
+                        );
+                        false
+                    };
+
+                    let json = format!(
+                        r#"{{"event":"{}","zone":"{}","direction":"{}","action_type":"shortcut","shortcut":"{}","keys":{:?},"test_mode":false,"success":{}}}"#,
+                        source_type, zone, direction, combo_str, key_names, success
+                    );
+                    broadcaster.broadcast(&json);
+                }
+            }
+            ActionPayload::CancelContact { .. } => {}
         }
     }
 
@@ -742,7 +1027,17 @@ fn action_source_context(source: ActionSource) -> String {
     match source {
         ActionSource::Gesture(gesture) => gesture_context(gesture),
         ActionSource::SliderStep(step) => slider_step_context(step),
+        ActionSource::Cancellation(cancel) => cancellation_context(cancel),
     }
+}
+
+fn cancellation_context(cancel: GestureCancellation) -> String {
+    format!(
+        "zone={} cancellation slot={} tracking_id={}",
+        zone_name(cancel.zone),
+        cancel.slot,
+        cancel.tracking_id
+    )
 }
 
 fn gesture_context(gesture: Gesture) -> String {
@@ -854,6 +1149,10 @@ fn zone_name(zone: Zone) -> &'static str {
         Zone::Right => "right",
         Zone::Top => "top",
         Zone::Bottom => "bottom",
+        Zone::TopLeft => "top-left",
+        Zone::TopRight => "top-right",
+        Zone::BottomLeft => "bottom-left",
+        Zone::BottomRight => "bottom-right",
     }
 }
 
@@ -1209,12 +1508,8 @@ mod tests {
 
     #[test]
     fn slider_step_selects_correct_hardware_default_keys() {
-        let mut dispatcher = ActionDispatcher::with_runner(
-            Vec::new(),
-            16,
-            ProcessCommandRunner,
-        )
-        .expect("dispatcher should start");
+        let mut dispatcher = ActionDispatcher::with_runner(Vec::new(), 16, ProcessCommandRunner)
+            .expect("dispatcher should start");
         dispatcher.set_test_mode(true);
 
         // Test fallback hardware defaults when no explicit bindings are configured:
@@ -1226,30 +1521,36 @@ mod tests {
         dispatcher.dispatch_slider_step(slider_step(Zone::Right, SliderDirection::Up));
         // Right Down -> KEY_VOLUMEDOWN (114)
         dispatcher.dispatch_slider_step(slider_step(Zone::Right, SliderDirection::Down));
+        // Top Right -> KEY_NEXTSONG (163)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Top, SliderDirection::Right));
+        // Top Left -> KEY_PREVIOUSSONG (165)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Top, SliderDirection::Left));
+        // Bottom Right -> KEY_RIGHT (106)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Bottom, SliderDirection::Right));
+        // Bottom Left -> KEY_LEFT (105)
+        dispatcher.dispatch_slider_step(slider_step(Zone::Bottom, SliderDirection::Left));
 
-        // Sleep briefly to let the test worker process the 4 commands
-        thread::sleep(Duration::from_millis(50));
+        // Sleep briefly to let the test worker process the 8 commands
+        thread::sleep(Duration::from_millis(60));
         let stats = dispatcher.shutdown();
 
-        assert_eq!(stats.matched_slider_steps, 4);
-        assert_eq!(stats.started_commands, 4);
-        assert_eq!(stats.succeeded_commands, 4);
+        assert_eq!(stats.matched_slider_steps, 8);
+        assert_eq!(stats.started_commands, 8);
+        assert_eq!(stats.succeeded_commands, 8);
     }
 
     #[test]
     fn slider_step_honors_gesture_binding_if_configured() {
         let mut dispatcher = ActionDispatcher::with_runner(
-            vec![
-                binding(
-                    Zone::Left,
-                    GestureDirection::Up,
-                    GestureActionConfig::Key {
-                        key_code: 104,
-                        key_name: "KEY_PAGEUP".to_string(),
-                        repeat: 1,
-                    },
-                ),
-            ],
+            vec![binding(
+                Zone::Left,
+                GestureDirection::Up,
+                GestureActionConfig::Key {
+                    key_code: 104,
+                    key_name: "KEY_PAGEUP".to_string(),
+                    repeat: 1,
+                },
+            )],
             16,
             ProcessCommandRunner,
         )
@@ -1267,12 +1568,8 @@ mod tests {
 
     #[test]
     fn rapid_slider_ticks_do_not_block_and_complete_independently() {
-        let mut dispatcher = ActionDispatcher::with_runner(
-            Vec::new(),
-            32,
-            ProcessCommandRunner,
-        )
-        .expect("dispatcher should start");
+        let mut dispatcher = ActionDispatcher::with_runner(Vec::new(), 32, ProcessCommandRunner)
+            .expect("dispatcher should start");
         dispatcher.set_test_mode(true);
         dispatcher.set_repeat_interval_ms(10);
 

@@ -169,6 +169,106 @@ fn doctor_cli_device_override_wins_over_config_device() {
     fs::remove_file(action).expect("action executable should be removed");
 }
 
+#[test]
+fn doctor_cli_checks_installation_and_flags_broken_legacy_service_unit() {
+    let root = unique_temp_dir("edgepad-doctor-cli-legacy-root");
+    let config_path = unique_temp_path("edgepad-doctor-cli-legacy-config");
+    let missing_uinput = unique_temp_path("edgepad-doctor-cli-legacy-uinput");
+    let action = unique_temp_executable("edgepad-doctor-cli-legacy-action");
+    let user_config_home = unique_temp_dir("edgepad-doctor-cli-legacy-xdg");
+    let user_service_dir = user_config_home.join("systemd/user");
+    let legacy_service_name = format!("edgepad-test-legacy-{}.service", std::process::id());
+    let legacy_service_file = user_service_dir.join(&legacy_service_name);
+
+    fs::create_dir_all(&root).expect("input root");
+    fs::create_dir_all(&user_service_dir).expect("user service dir");
+    write_config(&config_path, "auto", &action);
+
+    // Write a broken legacy service unit pointing to /home/vicky
+    fs::write(
+        &legacy_service_file,
+        "[Service]\nExecStart=/home/vicky/.local/bin/edgepad daemon\n",
+    )
+    .expect("legacy service written");
+
+    let output = edgepad()
+        .env("XDG_CONFIG_HOME", &user_config_home)
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--input-root")
+        .arg(&root)
+        .arg("--uinput")
+        .arg(&missing_uinput)
+        .arg("--service")
+        .arg(&legacy_service_name)
+        .output()
+        .expect("doctor run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Installation"), "stdout: {stdout}");
+    assert!(stdout.contains("executable"), "stdout: {stdout}");
+    assert!(stdout.contains("gui assets"), "stdout: {stdout}");
+    assert!(stdout.contains("template"), "stdout: {stdout}");
+    assert!(stdout.contains("runtime deps"), "stdout: {stdout}");
+    assert!(stdout.contains("user unit"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("references hardcoded developer path '/home/vicky'"),
+        "stdout: {stdout}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_file(config_path);
+    let _ = fs::remove_file(action);
+    let _ = fs::remove_dir_all(user_config_home);
+}
+
+#[test]
+fn doctor_cli_repair_backs_up_and_migrates_legacy_unit() {
+    let user_config_home = unique_temp_dir("edgepad-doctor-cli-repair-xdg");
+    let user_service_dir = user_config_home.join("systemd/user");
+    let service_name = format!("edgepad-repair-test-{}.service", std::process::id());
+    let service_file = user_service_dir.join(&service_name);
+
+    fs::create_dir_all(&user_service_dir).expect("user service dir");
+    fs::write(
+        &service_file,
+        "[Service]\nExecStart=/home/vicky/.local/bin/edgepad daemon\n",
+    )
+    .expect("write service");
+
+    let output = edgepad()
+        .env("XDG_CONFIG_HOME", &user_config_home)
+        .arg("doctor")
+        .arg("--service")
+        .arg(&service_name)
+        .arg("--repair")
+        .output()
+        .expect("doctor run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("repairing installation and service state"),
+        "stdout: {stdout}"
+    );
+
+    // Verify backup was created
+    let mut found_backup = false;
+    for e in fs::read_dir(&user_service_dir).expect("read dir").flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with(&format!("{service_name}.bak.")) {
+            found_backup = true;
+            break;
+        }
+    }
+    assert!(
+        found_backup,
+        "Backup file was not created in user service dir"
+    );
+
+    let _ = fs::remove_dir_all(user_config_home);
+}
+
 fn write_config(path: &Path, device: &str, action: &Path) {
     fs::write(
         path,

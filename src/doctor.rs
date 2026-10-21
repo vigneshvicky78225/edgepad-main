@@ -22,6 +22,7 @@ pub struct DoctorConfig {
     pub input_root: PathBuf,
     pub uinput_path: PathBuf,
     pub service_name: String,
+    pub repair: bool,
 }
 
 impl Default for DoctorConfig {
@@ -32,6 +33,7 @@ impl Default for DoctorConfig {
             input_root: PathBuf::from("/dev/input"),
             uinput_path: PathBuf::from("/dev/uinput"),
             service_name: "edgepad.service".to_string(),
+            repair: false,
         }
     }
 }
@@ -79,6 +81,7 @@ impl DoctorCheck {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoctorSection {
+    Installation,
     Config,
     Actions,
     Device,
@@ -88,7 +91,8 @@ pub enum DoctorSection {
 }
 
 impl DoctorSection {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
+        Self::Installation,
         Self::Config,
         Self::Actions,
         Self::Device,
@@ -99,6 +103,7 @@ impl DoctorSection {
 
     pub fn title(self) -> &'static str {
         match self {
+            Self::Installation => "Installation",
             Self::Config => "Config",
             Self::Actions => "Actions",
             Self::Device => "Device",
@@ -143,6 +148,7 @@ pub struct DoctorCounts {
 
 pub fn run_doctor(config: &DoctorConfig) -> DoctorReport {
     let mut report = DoctorReport::default();
+    check_installation(&mut report);
     let loaded_config = check_config(config, &mut report);
     let effective_device = check_config_device(
         loaded_config.as_ref(),
@@ -431,7 +437,7 @@ fn check_action_executables(config: &EdgepadConfig, report: &mut DoctorReport) {
                         .push(gesture_binding_label(binding.zone, binding.direction));
                 }
             }
-            GestureActionConfig::Key { .. } => {
+            GestureActionConfig::Key { .. } | GestureActionConfig::KeyCombo { .. } => {
                 key_count += 1;
             }
             GestureActionConfig::Log => {}
@@ -1053,11 +1059,352 @@ fn check_systemd_user(report: &mut DoctorReport) -> bool {
     }
 }
 
+fn check_installation(report: &mut DoctorReport) {
+    // 1. Executable location and permissions
+    let usr_bin = Path::new("/usr/bin/edgepad");
+    if usr_bin.exists() {
+        match fs::metadata(usr_bin) {
+            Ok(meta) => {
+                let mode = meta.permissions().mode();
+                if mode & 0o111 != 0 {
+                    report.checks.push(DoctorCheck::new(
+                        CheckStatus::Ok,
+                        DoctorSection::Installation,
+                        "executable",
+                        format!("{} (mode {:o})", usr_bin.display(), mode & 0o777),
+                    ));
+                } else {
+                    report.checks.push(DoctorCheck::new(
+                        CheckStatus::Fail,
+                        DoctorSection::Installation,
+                        "executable",
+                        format!(
+                            "{} exists but is not executable (mode {:o})",
+                            usr_bin.display(),
+                            mode & 0o777
+                        ),
+                    ));
+                }
+            }
+            Err(e) => {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Installation,
+                    "executable",
+                    format!("failed to inspect {}: {e}", usr_bin.display()),
+                ));
+            }
+        }
+    } else if let Ok(current) = env::current_exe() {
+        match fs::metadata(&current) {
+            Ok(meta) => {
+                let mode = meta.permissions().mode();
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Ok,
+                    DoctorSection::Installation,
+                    "executable",
+                    format!(
+                        "{} (local/dev build, mode {:o})",
+                        current.display(),
+                        mode & 0o777
+                    ),
+                ));
+            }
+            Err(_) => {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Ok,
+                    DoctorSection::Installation,
+                    "executable",
+                    format!("{} (local/dev build)", current.display()),
+                ));
+            }
+        }
+    } else {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Fail,
+            DoctorSection::Installation,
+            "executable",
+            "no edgepad executable found",
+        ));
+    }
+
+    // 2. GUI resources
+    let usr_gui = Path::new("/usr/share/edgepad/gui/main.py");
+    let local_gui = env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".local/share/edgepad/gui/main.py"));
+    let repo_gui = Path::new("gui/main.py");
+    if usr_gui.exists() {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Installation,
+            "gui assets",
+            format!("{}", usr_gui.display()),
+        ));
+    } else if local_gui.as_ref().map(|p| p.exists()).unwrap_or(false) {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Installation,
+            "gui assets",
+            format!("{}", local_gui.unwrap().display()),
+        ));
+    } else if repo_gui.exists() {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Installation,
+            "gui assets",
+            "gui/main.py (workspace directory)",
+        ));
+    } else {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Installation,
+            "gui assets",
+            "GUI entry point /usr/share/edgepad/gui/main.py not found",
+        ));
+    }
+
+    // 3. Configuration template
+    let template = Path::new("/usr/share/edgepad/edgepad.toml");
+    let template_example = Path::new("/usr/share/edgepad/edgepad.toml.example");
+    let repo_template = Path::new("packaging/edgepad.toml");
+    if template.exists() {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Installation,
+            "template",
+            format!("{}", template.display()),
+        ));
+    } else if template_example.exists() {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Installation,
+            "template",
+            format!("{}", template_example.display()),
+        ));
+    } else if repo_template.exists() {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Installation,
+            "template",
+            "packaging/edgepad.toml (workspace directory)",
+        ));
+    } else {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Installation,
+            "template",
+            "template /usr/share/edgepad/edgepad.toml not found",
+        ));
+    }
+
+    // 4. Runtime dependencies (python3, PySide6)
+    match command_output("python3", &["--version"]) {
+        Ok(output) if output.status_success => {
+            let py_ver = output.stdout.trim();
+            let pyside_check = command_output(
+                "python3",
+                &["-c", "import PySide6; print(PySide6.__version__)"],
+            );
+            match pyside_check {
+                Ok(pout) if pout.status_success => {
+                    report.checks.push(DoctorCheck::new(
+                        CheckStatus::Ok,
+                        DoctorSection::Installation,
+                        "runtime deps",
+                        format!("{}, PySide6 {}", py_ver, pout.stdout.trim()),
+                    ));
+                }
+                _ => {
+                    report.checks.push(DoctorCheck::new(
+                        CheckStatus::Warn,
+                        DoctorSection::Installation,
+                        "runtime deps",
+                        format!("{py_ver} found; PySide6 missing (required for GUI)"),
+                    ));
+                }
+            }
+        }
+        _ => {
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Warn,
+                DoctorSection::Installation,
+                "runtime deps",
+                "python3 not found in PATH",
+            ));
+        }
+    }
+
+    // 5. IPC runtime directory
+    match env::var("XDG_RUNTIME_DIR") {
+        Ok(dir) => {
+            let p = PathBuf::from(dir);
+            if p.exists() {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Ok,
+                    DoctorSection::Installation,
+                    "ipc dir",
+                    format!("{} (available)", p.display()),
+                ));
+            } else {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Installation,
+                    "ipc dir",
+                    format!("XDG_RUNTIME_DIR '{}' does not exist", p.display()),
+                ));
+            }
+        }
+        Err(_) => {
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Warn,
+                DoctorSection::Installation,
+                "ipc dir",
+                "XDG_RUNTIME_DIR environment variable is not set",
+            ));
+        }
+    }
+}
+
+fn command_in_path(name: &str) -> bool {
+    let p = Path::new(name);
+    if p.is_absolute() {
+        return p.exists();
+    }
+    if let Ok(path_var) = env::var("PATH") {
+        for dir in env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn check_service_status(
     service_name: &str,
     systemd_user_available: bool,
     report: &mut DoctorReport,
 ) {
+    // 1. Canonical system unit
+    let canonical_path = PathBuf::from("/usr/lib/systemd/user").join(service_name);
+    if canonical_path.exists() {
+        if let Ok(content) = fs::read_to_string(&canonical_path) {
+            let mut exec_start = "unknown";
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(cmd) = trimmed.strip_prefix("ExecStart=") {
+                    exec_start = cmd;
+                    break;
+                }
+            }
+            if content.contains("/home/vicky") {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Service,
+                    "canonical unit",
+                    format!(
+                        "{} contains hardcoded developer path '/home/vicky'",
+                        canonical_path.display()
+                    ),
+                ));
+            } else {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Ok,
+                    DoctorSection::Service,
+                    "canonical unit",
+                    format!("{} (ExecStart={})", canonical_path.display(), exec_start),
+                ));
+            }
+        } else {
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Service,
+                "canonical unit",
+                format!("{}", canonical_path.display()),
+            ));
+        }
+    } else {
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Service,
+            "canonical unit",
+            format!(
+                "{} not found (system package unit)",
+                canonical_path.display()
+            ),
+        ));
+    }
+
+    // 2. User unit override in ~/.config/systemd/user/
+    let user_unit_dir = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".config"))
+                .unwrap_or_else(|_| PathBuf::from("/root/.config"))
+        })
+        .join("systemd/user");
+    let user_unit_path = user_unit_dir.join(service_name);
+
+    if user_unit_path.exists() {
+        if let Ok(content) = fs::read_to_string(&user_unit_path) {
+            let mut reasons = Vec::new();
+
+            if content.contains("/home/vicky") {
+                reasons.push("references hardcoded developer path '/home/vicky'".to_string());
+            }
+
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(cmd) = trimmed.strip_prefix("ExecStart=") {
+                    let exec_bin = cmd.split_whitespace().next().unwrap_or("");
+                    let home = env::var("HOME").unwrap_or_default();
+                    let expanded = exec_bin.replace("%h", &home);
+                    let p = Path::new(&expanded);
+                    if !p.exists() && !command_in_path(&expanded) {
+                        reasons.push(format!(
+                            "ExecStart binary '{}' does not exist (causes status 203/EXEC)",
+                            exec_bin
+                        ));
+                    }
+                    break;
+                }
+            }
+
+            if !reasons.is_empty() {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Service,
+                    "user unit",
+                    format!(
+                        "{} is broken: {} (run 'edgepad doctor --repair' to fix)",
+                        user_unit_path.display(),
+                        reasons.join("; ")
+                    ),
+                ));
+            } else if canonical_path.exists() {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Warn,
+                    DoctorSection::Service,
+                    "user unit",
+                    format!(
+                        "{} is overriding package canonical unit",
+                        user_unit_path.display()
+                    ),
+                ));
+            } else {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Ok,
+                    DoctorSection::Service,
+                    "user unit",
+                    format!("{}", user_unit_path.display()),
+                ));
+            }
+        }
+    }
+
     if !systemd_user_available {
         report.checks.push(DoctorCheck::new(
             CheckStatus::Warn,
@@ -1080,6 +1427,12 @@ fn check_service_status(
             "ActiveState",
             "-p",
             "SubState",
+            "-p",
+            "FragmentPath",
+            "-p",
+            "ExecMainStatus",
+            "-p",
+            "ExecMainCode",
         ],
     );
 
@@ -1088,6 +1441,18 @@ fn check_service_status(
             let load_state = property_value(&output.stdout, "LoadState").unwrap_or("unknown");
             let active_state = property_value(&output.stdout, "ActiveState").unwrap_or("unknown");
             let sub_state = property_value(&output.stdout, "SubState").unwrap_or("unknown");
+            let fragment = property_value(&output.stdout, "FragmentPath").unwrap_or("");
+            let exec_status = property_value(&output.stdout, "ExecMainStatus").unwrap_or("0");
+
+            if !fragment.is_empty() {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Ok,
+                    DoctorSection::Service,
+                    "fragment",
+                    fragment.to_string(),
+                ));
+            }
+
             if load_state == "not-found" {
                 report.checks.push(DoctorCheck::new(
                     CheckStatus::Warn,
@@ -1103,12 +1468,23 @@ fn check_service_status(
                     format!("{service_name} is active ({sub_state})"),
                 ));
             } else if active_state == "failed" {
-                report.checks.push(DoctorCheck::new(
-                    CheckStatus::Fail,
-                    DoctorSection::Service,
-                    "unit",
-                    format!("{service_name} is failed ({sub_state})"),
-                ));
+                if exec_status == "203" {
+                    report.checks.push(DoctorCheck::new(
+                        CheckStatus::Fail,
+                        DoctorSection::Service,
+                        "unit",
+                        format!("{service_name} failed with status 203/EXEC: executable not found or not executable. Run 'edgepad doctor --repair' to fix."),
+                    ));
+                } else {
+                    report.checks.push(DoctorCheck::new(
+                        CheckStatus::Fail,
+                        DoctorSection::Service,
+                        "unit",
+                        format!(
+                            "{service_name} is failed ({sub_state}, exit status {exec_status})"
+                        ),
+                    ));
+                }
             } else {
                 report.checks.push(DoctorCheck::new(
                     CheckStatus::Warn,
@@ -1136,6 +1512,186 @@ fn check_service_status(
             err,
         )),
     }
+}
+
+pub fn repair_service(service_name: &str) -> Result<Vec<String>, String> {
+    let mut actions = Vec::new();
+
+    let user_unit_dir = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".config"))
+                .unwrap_or_else(|_| PathBuf::from("/root/.config"))
+        })
+        .join("systemd/user");
+    let user_unit_path = user_unit_dir.join(service_name);
+    let canonical_path = PathBuf::from("/usr/lib/systemd/user").join(service_name);
+
+    if user_unit_path.exists() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup_path = user_unit_path.with_file_name(format!("{service_name}.bak.{timestamp}"));
+
+        let content = fs::read_to_string(&user_unit_path).unwrap_or_default();
+        let mut is_broken = content.contains("/home/vicky");
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(cmd) = trimmed.strip_prefix("ExecStart=") {
+                let exec_bin = cmd.split_whitespace().next().unwrap_or("");
+                let home = env::var("HOME").unwrap_or_default();
+                let expanded = exec_bin.replace("%h", &home);
+                let p = Path::new(&expanded);
+                if !p.exists() && !command_in_path(&expanded) {
+                    is_broken = true;
+                }
+                break;
+            }
+        }
+        if canonical_path.exists() {
+            is_broken = true;
+        }
+
+        if is_broken {
+            fs::copy(&user_unit_path, &backup_path)
+                .map_err(|e| format!("failed to back up {}: {e}", user_unit_path.display()))?;
+            fs::remove_file(&user_unit_path)
+                .map_err(|e| format!("failed to remove {}: {e}", user_unit_path.display()))?;
+            actions.push(format!(
+                "Backed up legacy/broken user unit to {} and unlinked override",
+                backup_path.display()
+            ));
+        }
+    }
+
+    if !canonical_path.exists() && !user_unit_path.exists() {
+        let exe = if Path::new("/usr/bin/edgepad").exists() {
+            "/usr/bin/edgepad".to_string()
+        } else {
+            let local_bin = env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".local/bin/edgepad"))
+                .unwrap_or_default();
+            if local_bin.exists() {
+                "%h/.local/bin/edgepad".to_string()
+            } else if let Ok(current) = env::current_exe() {
+                let current_str = current.display().to_string();
+                if let Ok(home) = env::var("HOME") {
+                    if current_str.starts_with(&home) {
+                        current_str.replacen(&home, "%h", 1)
+                    } else {
+                        current_str
+                    }
+                } else {
+                    current_str
+                }
+            } else {
+                "/usr/bin/edgepad".to_string()
+            }
+        };
+
+        let unit_content = format!(
+            r#"[Unit]
+Description=edgepad touchpad edge gesture daemon
+Documentation=https://github.com/assembledev/edgepad
+
+[Service]
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=45s
+ExecStart={exe} daemon
+ExecReload=/usr/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+"#
+        );
+
+        fs::create_dir_all(&user_unit_dir)
+            .map_err(|e| format!("failed to create {}: {e}", user_unit_dir.display()))?;
+        fs::write(&user_unit_path, unit_content)
+            .map_err(|e| format!("failed to write {}: {e}", user_unit_path.display()))?;
+        actions.push(format!(
+            "Installed canonical user unit to {}",
+            user_unit_path.display()
+        ));
+    }
+
+    // Ensure user config exists
+    let config_dir = env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".config"))
+                .unwrap_or_else(|_| PathBuf::from("/root/.config"))
+        })
+        .join("edgepad");
+    let config_file = config_dir.join("edgepad.toml");
+    if !config_file.exists() {
+        let _ = fs::create_dir_all(&config_dir);
+        let template = Path::new("/usr/share/edgepad/edgepad.toml");
+        let template_example = Path::new("/usr/share/edgepad/edgepad.toml.example");
+        if template.exists() {
+            if fs::copy(template, &config_file).is_ok() {
+                actions.push(format!(
+                    "Initialized config {} from {}",
+                    config_file.display(),
+                    template.display()
+                ));
+            }
+        } else if template_example.exists() {
+            if fs::copy(template_example, &config_file).is_ok() {
+                actions.push(format!(
+                    "Initialized config {} from {}",
+                    config_file.display(),
+                    template_example.display()
+                ));
+            }
+        } else {
+            let preset = EdgepadConfig::default_preset();
+            if let Ok(toml_str) = preset.to_toml() {
+                if fs::write(&config_file, toml_str).is_ok() {
+                    actions.push(format!(
+                        "Initialized default config at {}",
+                        config_file.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    // Reset failed state and reload systemd daemon
+    let _ = Command::new("systemctl")
+        .args(["--user", "reset-failed", service_name])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+    actions.push(format!(
+        "Cleared failed state and reloaded systemd user daemon for {service_name}"
+    ));
+
+    // Try restarting service
+    let restart_out = Command::new("systemctl")
+        .args(["--user", "restart", service_name])
+        .output();
+    if let Ok(out) = restart_out {
+        if out.status.success() {
+            actions.push(format!("Successfully restarted {service_name}"));
+        } else {
+            let msg = String::from_utf8_lossy(&out.stderr);
+            let trimmed = msg.trim();
+            if !trimmed.is_empty() {
+                actions.push(format!("Service restart: {trimmed}"));
+            }
+        }
+    }
+
+    Ok(actions)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1211,6 +1767,10 @@ fn zone_name(zone: Zone) -> &'static str {
         Zone::Right => "right",
         Zone::Top => "top",
         Zone::Bottom => "bottom",
+        Zone::TopLeft => "top-left",
+        Zone::TopRight => "top-right",
+        Zone::BottomLeft => "bottom-left",
+        Zone::BottomRight => "bottom-right",
     }
 }
 
