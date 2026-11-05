@@ -1301,8 +1301,140 @@ pub mod core {
                 return Ok(());
             };
 
-            if !self.is_within_zone(zone, current_x, current_y) {
-                self.cancel_claimed_slot(slot, zone, output)?;
+            // If contact started in a corner and has moved beyond tap threshold, transition to adjacent edge
+            if matches!(
+                zone,
+                Zone::TopLeft | Zone::TopRight | Zone::BottomLeft | Zone::BottomRight
+            ) && slot_state.contact_phase == ContactPhase::Motion
+            {
+                let start_x = slot_state.start_x.unwrap_or(current_x);
+                let start_y = slot_state.start_y.unwrap_or(current_y);
+                let dx = (current_x - start_x).abs();
+                let dy = (current_y - start_y).abs();
+
+                let transition_zone = match zone {
+                    Zone::TopLeft => {
+                        if dy >= dx && self.is_within_zone(Zone::Left, current_x, current_y) {
+                            Some(Zone::Left)
+                        } else if dx > dy && self.is_within_zone(Zone::Top, current_x, current_y) {
+                            Some(Zone::Top)
+                        } else {
+                            None
+                        }
+                    }
+                    Zone::TopRight => {
+                        if dy >= dx && self.is_within_zone(Zone::Right, current_x, current_y) {
+                            Some(Zone::Right)
+                        } else if dx > dy && self.is_within_zone(Zone::Top, current_x, current_y) {
+                            Some(Zone::Top)
+                        } else {
+                            None
+                        }
+                    }
+                    Zone::BottomLeft => {
+                        if dy >= dx && self.is_within_zone(Zone::Left, current_x, current_y) {
+                            Some(Zone::Left)
+                        } else if dx > dy && self.is_within_zone(Zone::Bottom, current_x, current_y) {
+                            Some(Zone::Bottom)
+                        } else {
+                            None
+                        }
+                    }
+                    Zone::BottomRight => {
+                        if dy >= dx && self.is_within_zone(Zone::Right, current_x, current_y) {
+                            Some(Zone::Right)
+                        } else if dx > dy && self.is_within_zone(Zone::Bottom, current_x, current_y) {
+                            Some(Zone::Bottom)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(target) = transition_zone {
+                    if self.options.active_zones.contains(target) {
+                        eprintln!(
+                            "[EDGEPAD_EVENT] [ZONE_TRANSITION] Contact in corner {:?} transitioned to edge {:?} on slot {}",
+                            zone, target, slot
+                        );
+                        let slot_mut = self.slot_mut(slot)?;
+                        slot_mut.ownership = Ownership::Claimed(target);
+                        slot_mut.tap_sequence_eligible = false;
+                        slot_mut.tap_sequence_match = false;
+                        if self.pending_tap.is_some() {
+                            self.flush_pending_tap(output);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+
+            let current_zone = match self.slot(slot)?.ownership {
+                Ownership::Claimed(z) => z,
+                _ => return Ok(()),
+            };
+
+            if !self.is_within_zone(current_zone, current_x, current_y) {
+                // Check if corner contact moved outside corner into adjacent edge
+                let adjacent_zone = match current_zone {
+                    Zone::TopLeft => {
+                        if self.is_within_zone(Zone::Left, current_x, current_y) {
+                            Some(Zone::Left)
+                        } else if self.is_within_zone(Zone::Top, current_x, current_y) {
+                            Some(Zone::Top)
+                        } else {
+                            None
+                        }
+                    }
+                    Zone::TopRight => {
+                        if self.is_within_zone(Zone::Right, current_x, current_y) {
+                            Some(Zone::Right)
+                        } else if self.is_within_zone(Zone::Top, current_x, current_y) {
+                            Some(Zone::Top)
+                        } else {
+                            None
+                        }
+                    }
+                    Zone::BottomLeft => {
+                        if self.is_within_zone(Zone::Left, current_x, current_y) {
+                            Some(Zone::Left)
+                        } else if self.is_within_zone(Zone::Bottom, current_x, current_y) {
+                            Some(Zone::Bottom)
+                        } else {
+                            None
+                        }
+                    }
+                    Zone::BottomRight => {
+                        if self.is_within_zone(Zone::Right, current_x, current_y) {
+                            Some(Zone::Right)
+                        } else if self.is_within_zone(Zone::Bottom, current_x, current_y) {
+                            Some(Zone::Bottom)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                if let Some(target) = adjacent_zone {
+                    if self.options.active_zones.contains(target) {
+                        eprintln!(
+                            "[EDGEPAD_EVENT] [ZONE_TRANSITION] Gesture transitioning from corner {:?} to adjacent edge {:?} on slot {}",
+                            current_zone, target, slot
+                        );
+                        let slot_mut = self.slot_mut(slot)?;
+                        slot_mut.ownership = Ownership::Claimed(target);
+                        slot_mut.tap_sequence_eligible = false;
+                        slot_mut.tap_sequence_match = false;
+                        if self.pending_tap.is_some() {
+                            self.flush_pending_tap(output);
+                        }
+                        return Ok(());
+                    }
+                }
+
+                self.cancel_claimed_slot(slot, current_zone, output)?;
             }
 
             Ok(())

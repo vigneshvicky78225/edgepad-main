@@ -15,6 +15,11 @@ ApplicationWindow {
     title: "Edgepad — Linux Touchpad Edge Gesture Manager"
     color: "#181b20"
 
+    SystemPalette {
+        id: sysPalette
+        colorGroup: SystemPalette.Active
+    }
+
     // Top Header Bar
     header: ToolBar {
         background: Rectangle {

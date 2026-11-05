@@ -175,13 +175,36 @@ def default_corner_tap_actions() -> list[dict[str, Any]]:
     ]
 
 
+def get_xdg_config_home() -> Path:
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config and xdg_config.strip():
+        return Path(xdg_config.strip())
+    return Path.home() / ".config"
+
+
+def get_xdg_data_home() -> Path:
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    if xdg_data and xdg_data.strip():
+        return Path(xdg_data.strip())
+    return Path.home() / ".local" / "share"
+
+
+def get_xdg_state_home() -> Path:
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    if xdg_state and xdg_state.strip():
+        return Path(xdg_state.strip())
+    return Path.home() / ".local" / "state"
+
+
+def get_xdg_cache_home() -> Path:
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache and xdg_cache.strip():
+        return Path(xdg_cache.strip())
+    return Path.home() / ".cache"
+
+
 def get_default_config_path() -> Path:
-    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
-    if xdg_config_home and xdg_config_home.strip():
-        base = Path(xdg_config_home.strip())
-    else:
-        base = Path.home() / ".config"
-    return base / "edgepad" / "edgepad.toml"
+    return get_xdg_config_home() / "edgepad" / "edgepad.toml"
 
 
 def get_backups_dir() -> Path:
@@ -371,7 +394,17 @@ class ConfigManager:
     def load_config(self) -> tuple[dict[str, Any], str | None]:
         """Loads configuration from disk or initializes default preset if missing."""
         if not self.config_exists():
-            self._current_config = default_preset_config()
+            default_cfg = default_preset_config()
+            try:
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                toml_text = self.to_toml_string(default_cfg)
+                temp_file = self.config_path.with_suffix(".tmp")
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    f.write(toml_text)
+                temp_file.replace(self.config_path)
+            except Exception:
+                pass
+            self._current_config = default_cfg
             return copy.deepcopy(self._current_config), None
 
         try:
@@ -382,7 +415,20 @@ class ConfigManager:
             self._current_config = parsed
             return copy.deepcopy(parsed), None
         except Exception as e:
-            return copy.deepcopy(self._current_config), f"Failed to load config: {e}"
+            backup_path_str = None
+            try:
+                self.backups_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_file = self.backups_dir / f"edgepad.toml.bak.{timestamp}"
+                shutil.copy2(self.config_path, backup_file)
+                backup_path_str = str(backup_file)
+            except Exception:
+                pass
+
+            msg = f"Failed to load config: {e}"
+            if backup_path_str:
+                msg += f". A safe backup of your malformed configuration was preserved at: {backup_path_str}"
+            return copy.deepcopy(self._current_config), msg
 
     def _normalize_config(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Normalizes TOML structure into unified GUI representation."""

@@ -1209,6 +1209,26 @@ impl GestureActionConfig {
     }
 }
 
+pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../examples/edgepad.toml.example");
+
+/// Result of ensuring a configuration file exists and is valid.
+#[derive(Debug, PartialEq)]
+pub enum EnsureConfigResult {
+    /// An existing valid configuration file was loaded.
+    LoadedExisting(EdgepadConfig),
+    /// No configuration file existed; initialized a new valid default configuration from template.
+    InitializedDefault {
+        path: PathBuf,
+        config: EdgepadConfig,
+    },
+    /// The configuration file exists but is malformed. A backup was created without overwriting user data.
+    MalformedBackupCreated {
+        path: PathBuf,
+        backup_path: PathBuf,
+        error: String,
+    },
+}
+
 pub fn load_edgepad_config(path: &Path) -> Result<EdgepadConfig, String> {
     let input = fs::read_to_string(path)
         .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
@@ -1216,19 +1236,93 @@ pub fn load_edgepad_config(path: &Path) -> Result<EdgepadConfig, String> {
         .map_err(|err| format!("failed to parse config {}: {err}", path.display()))
 }
 
+pub fn resolve_edgepad_config_dir() -> Result<PathBuf, String> {
+    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        Ok(PathBuf::from(config_home).join("edgepad"))
+    } else if let Some(home) = env::var_os("HOME").filter(|v| !v.is_empty()) {
+        Ok(PathBuf::from(home).join(".config/edgepad"))
+    } else {
+        Err("failed to resolve user config directory: neither XDG_CONFIG_HOME nor HOME is set".to_string())
+    }
+}
+
+pub fn resolve_edgepad_data_dir() -> Result<PathBuf, String> {
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        Ok(PathBuf::from(data_home).join("edgepad"))
+    } else if let Some(home) = env::var_os("HOME").filter(|v| !v.is_empty()) {
+        Ok(PathBuf::from(home).join(".local/share/edgepad"))
+    } else {
+        Err("failed to resolve user data directory: neither XDG_DATA_HOME nor HOME is set".to_string())
+    }
+}
+
 pub fn default_edgepad_config_path() -> Result<PathBuf, String> {
-    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(config_home).join("edgepad/edgepad.toml"));
-    }
+    resolve_edgepad_config_dir().map(|dir| dir.join("edgepad.toml"))
+}
 
-    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(home).join(".config/edgepad/edgepad.toml"));
-    }
+pub fn ensure_edgepad_config(path: &Path) -> Result<EnsureConfigResult, String> {
+    if path.exists() {
+        if !path.is_file() {
+            return Err(format!("config path is not a file: {}", path.display()));
+        }
+        let content = fs::read_to_string(path)
+            .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
+        match EdgepadConfig::parse(&content) {
+            Ok(config) => Ok(EnsureConfigResult::LoadedExisting(config)),
+            Err(parse_err) => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let backup_dir = path.parent().unwrap_or_else(|| Path::new(".")).join("backups");
+                let _ = fs::create_dir_all(&backup_dir);
+                let backup_file_name = format!(
+                    "{}.bak.{}",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("edgepad.toml"),
+                    timestamp
+                );
+                let backup_path = backup_dir.join(backup_file_name);
+                let _ = fs::copy(path, &backup_path);
+                Ok(EnsureConfigResult::MalformedBackupCreated {
+                    path: path.to_path_buf(),
+                    backup_path,
+                    error: parse_err,
+                })
+            }
+        }
+    } else {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create config directory {}: {err}", parent.display()))?;
+            let backups_dir = parent.join("backups");
+            let _ = fs::create_dir_all(&backups_dir);
+        }
 
-    Err(
-        "config path was not provided; pass --config <file> or set XDG_CONFIG_HOME/HOME"
-            .to_string(),
-    )
+        let template_candidates = [
+            PathBuf::from("/usr/share/edgepad/edgepad.toml"),
+            PathBuf::from("/usr/local/share/edgepad/edgepad.toml"),
+        ];
+        let template_content = template_candidates
+            .iter()
+            .find(|p| p.is_file())
+            .and_then(|p| fs::read_to_string(p).ok())
+            .unwrap_or_else(|| DEFAULT_CONFIG_TEMPLATE.to_string());
+
+        let config = EdgepadConfig::parse(&template_content)
+            .map_err(|err| format!("default config template failed validation: {err}"))?;
+
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp_path = parent.join(format!(".edgepad_cfg_{}.tmp", std::process::id()));
+        fs::write(&tmp_path, &template_content)
+            .map_err(|err| format!("failed to write temporary config {}: {err}", tmp_path.display()))?;
+        fs::rename(&tmp_path, path)
+            .map_err(|err| format!("failed to finalize config file {}: {err}", path.display()))?;
+
+        Ok(EnsureConfigResult::InitializedDefault {
+            path: path.to_path_buf(),
+            config,
+        })
+    }
 }
 
 pub fn parse_edge_width(raw_value: &str) -> Result<f32, String> {

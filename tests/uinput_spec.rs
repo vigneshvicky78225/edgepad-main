@@ -148,6 +148,11 @@ fn virtual_touchpad_spec_preserves_physical_abs_resolution_for_pointer_speed() {
                 flat: 8,
                 resolution: 42,
             },
+            mt_pressure: None,
+            abs_pressure: None,
+            mt_touch_major: None,
+            mt_touch_minor: None,
+            mt_orientation: None,
         },
         "edgepad mirrored touchpad",
     );
@@ -196,4 +201,18 @@ fn virtual_touchpad_spec_preserves_physical_abs_resolution_for_pointer_speed() {
             },
         ]
     );
+}
+
+#[test]
+fn virtual_touchpad_spec_preserves_physical_pressure_and_contact_dimensions() {
+    use edgepad::raw::{ABS_MT_PRESSURE, ABS_MT_TOUCH_MAJOR, ABS_MT_TOUCH_MINOR};
+    let mut abs_info = PhysicalTouchpadAbsInfo::from_capabilities(test_capabilities());
+    abs_info.mt_pressure = Some(VirtualAbsAxis::new(ABS_MT_PRESSURE, 0, 255));
+    abs_info.mt_touch_major = Some(VirtualAbsAxis::new(ABS_MT_TOUCH_MAJOR, 0, 15));
+    abs_info.mt_touch_minor = Some(VirtualAbsAxis::new(ABS_MT_TOUCH_MINOR, 0, 15));
+
+    let spec = VirtualTouchpadSpec::from_physical_abs_info(abs_info, "edgepad multitouch");
+    assert!(spec.absolute_axes.iter().any(|axis| axis.code == ABS_MT_PRESSURE && axis.max == 255));
+    assert!(spec.absolute_axes.iter().any(|axis| axis.code == ABS_MT_TOUCH_MAJOR && axis.max == 15));
+    assert!(spec.absolute_axes.iter().any(|axis| axis.code == ABS_MT_TOUCH_MINOR && axis.max == 15));
 }

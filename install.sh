@@ -5,6 +5,7 @@ REPO="${EDGEPAD_REPO:-assembledev/edgepad}"
 VERSION="${EDGEPAD_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
 CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 CONFIG_DIR="${CONFIG_HOME}/edgepad"
 CONFIG_FILE="${CONFIG_DIR}/edgepad.toml"
 SYSTEMD_USER_DIR="${CONFIG_HOME}/systemd/user"
@@ -29,6 +30,7 @@ Environment:
   EDGEPAD_REPO=owner/repo      GitHub repository [default: assembledev/edgepad]
   EDGEPAD_VERSION=vX.Y.Z      Release tag to install [default: latest]
   XDG_CONFIG_HOME=path        User config root [default: ~/.config]
+  XDG_DATA_HOME=path          User data root [default: ~/.local/share]
 EOF
 }
 
@@ -222,6 +224,12 @@ if [ "$MODE" = "uninstall" ]; then
     remove_file_if_present "$SERVICE_FILE"
     run_optional systemctl --user daemon-reload
     remove_file_if_present "${BIN_DIR}/edgepad"
+    remove_file_if_present "${DATA_HOME}/applications/org.edgepad.Edgepad.desktop"
+    remove_file_if_present "${DATA_HOME}/icons/hicolor/scalable/apps/org.edgepad.Edgepad.svg"
+    if [ -d "${DATA_HOME}/edgepad/gui" ]; then
+        rm -rf "${DATA_HOME}/edgepad/gui"
+        info "Removed: ${DATA_HOME}/edgepad/gui"
+    fi
     if sudo_remove_file_if_present "$UDEV_RULE_FILE"; then
         sudo_run udevadm control --reload
         sudo_run_optional udevadm trigger --subsystem-match=input --action=change
@@ -313,6 +321,25 @@ if [ ! -x "/usr/bin/edgepad" ] || [ "${BIN_DIR}/edgepad" != "/usr/bin/edgepad" ]
 fi
 
 run install -Dm0644 "${tmp_dir}/edgepad.service" "$SERVICE_FILE"
+
+# Install GUI components to ${DATA_HOME}/edgepad/gui if present locally
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+if [ -d "${script_dir}/gui" ]; then
+    info "Installing GUI components to ${DATA_HOME}/edgepad/gui..."
+    run mkdir -p "${DATA_HOME}/edgepad/gui"
+    run cp -a "${script_dir}/gui"/* "${DATA_HOME}/edgepad/gui/"
+    run chmod 0755 "${DATA_HOME}/edgepad/gui/main.py"
+
+    if [ -f "${script_dir}/packaging/org.edgepad.Edgepad.desktop" ]; then
+        run mkdir -p "${DATA_HOME}/applications"
+        run install -Dm0644 "${script_dir}/packaging/org.edgepad.Edgepad.desktop" "${DATA_HOME}/applications/org.edgepad.Edgepad.desktop"
+    fi
+    if [ -f "${script_dir}/packaging/icons/org.edgepad.Edgepad.svg" ]; then
+        run mkdir -p "${DATA_HOME}/icons/hicolor/scalable/apps"
+        run install -Dm0644 "${script_dir}/packaging/icons/org.edgepad.Edgepad.svg" "${DATA_HOME}/icons/hicolor/scalable/apps/org.edgepad.Edgepad.svg"
+    fi
+fi
+
 run systemctl --user daemon-reload
 run_optional systemctl --user reset-failed edgepad.service
 run systemctl --user enable edgepad.service

@@ -9,8 +9,9 @@ use std::process::Command;
 use evdev::Device;
 
 use crate::config::{
-    default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
-    GestureActionConfig,
+    default_edgepad_config_path, ensure_edgepad_config, load_edgepad_config,
+    resolve_edgepad_config_dir, resolve_edgepad_data_dir, DeviceConfig, EdgepadConfig,
+    EnsureConfigResult, GestureActionConfig, DEFAULT_CONFIG_TEMPLATE,
 };
 use crate::core::{EdgeWidths, GestureDirection, SliderDirection, Zone};
 use crate::device::{discover_device_report, format_device_line, touchpad_candidates};
@@ -41,6 +42,8 @@ impl Default for DoctorConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
     Ok,
+    Pass,
+    Info,
     Warn,
     Fail,
 }
@@ -48,7 +51,8 @@ pub enum CheckStatus {
 impl CheckStatus {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Ok => "ok",
+            Self::Ok | Self::Pass => "pass",
+            Self::Info => "info",
             Self::Warn => "warn",
             Self::Fail => "fail",
         }
@@ -130,7 +134,8 @@ impl DoctorReport {
         let mut counts = DoctorCounts::default();
         for check in &self.checks {
             match check.status {
-                CheckStatus::Ok => counts.ok += 1,
+                CheckStatus::Ok | CheckStatus::Pass => counts.ok += 1,
+                CheckStatus::Info => counts.info += 1,
                 CheckStatus::Warn => counts.warn += 1,
                 CheckStatus::Fail => counts.fail += 1,
             }
@@ -142,6 +147,7 @@ impl DoctorReport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DoctorCounts {
     pub ok: usize,
+    pub info: usize,
     pub warn: usize,
     pub fail: usize,
 }
@@ -177,6 +183,7 @@ pub fn run_doctor(config: &DoctorConfig) -> DoctorReport {
         device_access_ok,
         &mut report,
     );
+    check_desktop_session(&mut report);
     check_logind_seat(device_access_ok, &mut report);
     let systemd_user_available = check_systemd_user(&mut report);
     check_service_status(&config.service_name, systemd_user_available, &mut report);
@@ -218,15 +225,27 @@ fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<Edge
             return None;
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            report.checks.push(DoctorCheck::new(
-                CheckStatus::Fail,
-                DoctorSection::Config,
-                "path",
-                format!(
-                    "not found: {}; pass --config <file> or create ~/.config/edgepad/edgepad.toml",
-                    path.display()
-                ),
-            ));
+            if config.config_path.is_none() {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Info,
+                    DoctorSection::Config,
+                    "path",
+                    format!(
+                        "not yet initialized at {}; defaults will be initialized automatically on first launch (or run 'edgepad doctor --repair')",
+                        path.display()
+                    ),
+                ));
+            } else {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Config,
+                    "path",
+                    format!(
+                        "not found: {}; pass --config <file> or create ~/.config/edgepad/edgepad.toml",
+                        path.display()
+                    ),
+                ));
+            }
             return None;
         }
         Err(err) => {
@@ -969,6 +988,27 @@ fn getfacl_grants_user(path: &Path, username: &str) -> Result<bool, String> {
     Ok(acl_output_grants_user(&output.stdout, username))
 }
 
+fn check_desktop_session(report: &mut DoctorReport) {
+    let desktop = env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unknown".to_string());
+    let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string());
+    let wayland_display = env::var("WAYLAND_DISPLAY").ok();
+
+    let detail = if session_type.eq_ignore_ascii_case("wayland") || wayland_display.is_some() {
+        format!("{desktop} on Wayland ({})", wayland_display.as_deref().unwrap_or("active"))
+    } else if session_type.eq_ignore_ascii_case("x11") {
+        format!("{desktop} on X11 (supported)")
+    } else {
+        format!("{desktop} ({session_type})")
+    };
+
+    report.checks.push(DoctorCheck::new(
+        CheckStatus::Ok,
+        DoctorSection::Session,
+        "desktop",
+        detail,
+    ));
+}
+
 fn check_logind_seat(device_access_ok: bool, report: &mut DoctorReport) {
     match command_output("loginctl", &["session-status", "--no-pager"]) {
         Ok(output)
@@ -1264,6 +1304,20 @@ fn check_installation(report: &mut DoctorReport) {
             ));
         }
     }
+
+    // 6. XDG Base Directories
+    let cfg_path = resolve_edgepad_config_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unresolved".to_string());
+    let data_path = resolve_edgepad_data_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unresolved".to_string());
+    report.checks.push(DoctorCheck::new(
+        CheckStatus::Ok,
+        DoctorSection::Installation,
+        "xdg paths",
+        format!("config={cfg_path}, data={data_path}"),
+    ));
 }
 
 fn command_in_path(name: &str) -> bool {
@@ -1485,6 +1539,15 @@ fn check_service_status(
                         ),
                     ));
                 }
+            } else if active_state == "inactive" {
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Info,
+                    DoctorSection::Service,
+                    "unit",
+                    format!(
+                        "{service_name} is installed and loaded, but inactive (run 'systemctl --user start {service_name}' or launch GUI)"
+                    ),
+                ));
             } else {
                 report.checks.push(DoctorCheck::new(
                     CheckStatus::Warn,
@@ -1512,6 +1575,49 @@ fn check_service_status(
             err,
         )),
     }
+}
+
+pub fn repair_config(config_path: Option<&Path>) -> Result<Vec<String>, String> {
+    let mut actions = Vec::new();
+    let path = match config_path {
+        Some(p) => p.to_path_buf(),
+        None => default_edgepad_config_path()?,
+    };
+
+    match ensure_edgepad_config(&path)? {
+        EnsureConfigResult::LoadedExisting(_) => {
+            actions.push(format!("Configuration at {} is valid", path.display()));
+        }
+        EnsureConfigResult::InitializedDefault { path: p, .. } => {
+            actions.push(format!("Initialized default configuration at {}", p.display()));
+        }
+        EnsureConfigResult::MalformedBackupCreated {
+            path: p,
+            backup_path,
+            error,
+        } => {
+            if let Some(parent) = p.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let template_candidates = [
+                PathBuf::from("/usr/share/edgepad/edgepad.toml"),
+                PathBuf::from("/usr/local/share/edgepad/edgepad.toml"),
+            ];
+            let template_content = template_candidates
+                .iter()
+                .find(|cand| cand.is_file())
+                .and_then(|cand| fs::read_to_string(cand).ok())
+                .unwrap_or_else(|| DEFAULT_CONFIG_TEMPLATE.to_string());
+            fs::write(&p, &template_content)
+                .map_err(|err| format!("failed to restore config {}: {err}", p.display()))?;
+            actions.push(format!(
+                "Backed up malformed config ({error}) to {} and restored valid default configuration at {}",
+                backup_path.display(),
+                p.display()
+            ));
+        }
+    }
+    Ok(actions)
 }
 
 pub fn repair_service(service_name: &str) -> Result<Vec<String>, String> {
@@ -1998,6 +2104,7 @@ mod tests {
             report.counts(),
             DoctorCounts {
                 ok: 1,
+                info: 0,
                 warn: 1,
                 fail: 1
             }

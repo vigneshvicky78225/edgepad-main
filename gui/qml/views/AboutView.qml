@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 
 ScrollView {
@@ -7,6 +8,33 @@ ScrollView {
 
     contentWidth: availableWidth
     clip: true
+
+    FileDialog {
+        id: exportConfigDialog
+        title: "Export Configuration"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["TOML files (*.toml)", "All files (*)"]
+        defaultSuffix: "toml"
+        onAccepted: {
+            if (edgepadController) {
+                var p = selectedFile.toString().replace(/^file:\/\//, "")
+                edgepadController.exportConfig(p)
+            }
+        }
+    }
+
+    FileDialog {
+        id: importConfigDialog
+        title: "Import Configuration"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["TOML files (*.toml)", "All files (*)"]
+        onAccepted: {
+            if (edgepadController) {
+                var p = selectedFile.toString().replace(/^file:\/\//, "")
+                edgepadController.importConfig(p)
+            }
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -117,23 +145,13 @@ ScrollView {
                     Button {
                         text: "Export Config"
                         icon.name: "document-save"
-                        onClicked: {
-                            if (edgepadController) {
-                                var p = "/tmp/edgepad_backup.toml"
-                                edgepadController.exportConfig(p)
-                            }
-                        }
+                        onClicked: exportConfigDialog.open()
                     }
 
                     Button {
                         text: "Import Config"
                         icon.name: "document-open"
-                        onClicked: {
-                            if (edgepadController) {
-                                var p = "/tmp/edgepad_backup.toml"
-                                edgepadController.importConfig(p)
-                            }
-                        }
+                        onClicked: importConfigDialog.open()
                     }
 
                     Item { Layout.fillHeight: true; Layout.fillWidth: true }

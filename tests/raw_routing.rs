@@ -389,3 +389,32 @@ fn route_resync_contacts_rebuilds_kernel_snapshot_as_passthrough() {
     assert!(routed.gestures.is_empty());
     assert!(!routed.resync_required);
 }
+
+#[test]
+fn route_raw_frame_preserves_multitouch_pressure_and_dimensions_for_center_touches() {
+    let mut engine = test_engine();
+    let frame = RawFrame::new(vec![
+        RawEvent::btn_touch(true),
+        RawEvent::abs_mt_slot(0),
+        RawEvent::abs_mt_tracking_id(100),
+        RawEvent::abs_mt_position_x(500),
+        RawEvent::abs_mt_position_y(300),
+        RawEvent::abs_mt_pressure(65),
+        RawEvent::abs_mt_touch_major(12),
+        RawEvent::abs_mt_touch_minor(8),
+    ]);
+
+    let routed = route_raw_frame(&mut engine, &frame).expect("frame with pressure should route");
+    assert_eq!(
+        routed.passthrough,
+        vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(100),
+            RawEvent::abs_mt_position_x(500),
+            RawEvent::abs_mt_position_y(300),
+            RawEvent::abs_mt_pressure(65),
+            RawEvent::abs_mt_touch_major(12),
+            RawEvent::abs_mt_touch_minor(8),
+        ]
+    );
+}

@@ -574,3 +574,82 @@ fn normal_pointer_movement_and_scrolling_in_center_remain_functional() {
     assert!(out4.slider_steps.is_empty());
     assert!(out4.cancellations.is_empty());
 }
+
+#[test]
+fn corner_downward_swipe_transitions_to_left_edge_slider() {
+    let mut engine = test_engine(0.10, 0.10, 0.10, 0.10, 50.0);
+
+    // Initial contact inside TopLeft corner hitbox: (x=50 < 150, y=50 < 150)
+    let out_down = engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(101),
+            Event::x(50),
+            Event::y(50),
+        ])
+        .unwrap();
+    assert!(out_down.cancellations.is_empty());
+    assert!(out_down.passthrough.is_empty());
+
+    // Continuous downward motion along the left edge (x=50 < 100 left edge width)
+    let mut total_steps = 0;
+    for y in [100, 150, 200, 250, 300, 350] {
+        let out = engine
+            .process_frame(&[Event::slot(0), Event::y(y)])
+            .unwrap();
+        assert!(
+            out.cancellations.is_empty(),
+            "Downward swipe along left edge must not be cancelled near corner boundary"
+        );
+        for step in out.slider_steps {
+            assert_eq!(step.zone, Zone::Left);
+            assert_eq!(step.direction, SliderDirection::Down);
+            total_steps += 1;
+        }
+    }
+
+    assert!(
+        total_steps >= 5,
+        "Expected at least 5 slider steps for 300 units traveled (got {total_steps})"
+    );
+
+    // Lift finger
+    let out_up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .unwrap();
+    assert!(out_up.gestures.is_empty());
+    assert!(out_up.cancellations.is_empty());
+}
+
+#[test]
+fn corner_downward_swipe_exiting_into_center_cancels() {
+    let mut engine = test_engine(0.10, 0.10, 0.10, 0.10, 50.0);
+
+    // Initial contact inside TopLeft corner hitbox: (x=50, y=50)
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(102),
+            Event::x(50),
+            Event::y(50),
+        ])
+        .unwrap();
+
+    // Move downward along left edge (x=50, y=150)
+    let out1 = engine
+        .process_frame(&[Event::slot(0), Event::y(150)])
+        .unwrap();
+    assert!(out1.cancellations.is_empty());
+
+    // Move horizontally into center of touchpad (x=300 >= 100): must cancel!
+    let out_center = engine
+        .process_frame(&[Event::slot(0), Event::x(300)])
+        .unwrap();
+    assert_eq!(
+        out_center.cancellations.len(),
+        1,
+        "Exiting left edge into center must trigger gesture cancellation"
+    );
+    assert_eq!(out_center.cancellations[0].zone, Zone::Left);
+}
+

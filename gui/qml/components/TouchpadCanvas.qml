@@ -476,6 +476,53 @@ Item {
             Behavior on width { NumberAnimation { duration: 120 } }
         }
 
+        // Live Contact Telemetry Cursor (Active during Live Testing)
+        Rectangle {
+            id: contactIndicator
+            readonly property bool hasContact: Boolean(
+                typeof edgepadController !== "undefined" &&
+                edgepadController &&
+                edgepadController.touchPosition &&
+                edgepadController.touchPosition.active
+            )
+            visible: hasContact
+            opacity: hasContact ? 1.0 : 0.0
+            x: (typeof edgepadController !== "undefined" && edgepadController && edgepadController.touchPosition && edgepadController.touchPosition.x !== undefined) ?
+                (padBody.width * edgepadController.touchPosition.x - width / 2) : (padBody.width / 2 - width / 2)
+            y: (typeof edgepadController !== "undefined" && edgepadController && edgepadController.touchPosition && edgepadController.touchPosition.y !== undefined) ?
+                (padBody.height * edgepadController.touchPosition.y - height / 2) : (padBody.height / 2 - height / 2)
+            width: 22
+            height: 22
+            radius: 11
+            color: "#38bdf8"
+            border.color: "#ffffff"
+            border.width: 2
+            z: 10
+
+            Behavior on x { NumberAnimation { duration: 60 } }
+            Behavior on y { NumberAnimation { duration: 60 } }
+            Behavior on opacity { NumberAnimation { duration: 150 } }
+
+            // Outer pulse ring
+            Rectangle {
+                anchors.centerIn: parent
+                width: 34
+                height: 34
+                radius: 17
+                color: "transparent"
+                border.color: "#38bdf8"
+                border.width: 1.5
+                opacity: 0.6
+
+                SequentialAnimation on scale {
+                    running: contactIndicator.visible
+                    loops: Animation.Infinite
+                    PropertyAnimation { from: 0.8; to: 1.3; duration: 800; easing.type: Easing.OutQuad }
+                    PropertyAnimation { from: 1.3; to: 0.8; duration: 800; easing.type: Easing.InQuad }
+                }
+            }
+        }
+
         // Bottom Touchpad physical click button divider line
         Rectangle {
             anchors.bottom: parent.bottom

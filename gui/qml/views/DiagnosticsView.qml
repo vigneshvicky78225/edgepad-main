@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import "../components"
 
@@ -8,6 +9,20 @@ ScrollView {
 
     contentWidth: availableWidth
     clip: true
+
+    FileDialog {
+        id: exportReportDialog
+        title: "Export Diagnostics Report"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["Markdown files (*.md)", "All files (*)"]
+        defaultSuffix: "md"
+        onAccepted: {
+            if (edgepadController) {
+                var localPath = selectedFile.toString().replace(/^file:\/\//, "")
+                edgepadController.exportDiagnostics(localPath)
+            }
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -36,19 +51,14 @@ ScrollView {
                 text: "Export Report"
                 icon.name: "document-save"
                 highlighted: true
-                onClicked: {
-                    if (edgepadController) {
-                        var path = "/tmp/edgepad_diagnostics_report.md"
-                        edgepadController.exportDiagnostics(path)
-                    }
-                }
+                onClicked: exportReportDialog.open()
             }
         }
 
         // Doctor Health Checks Summary Cards
         GridLayout {
             Layout.fillWidth: true
-            columns: root.width > 650 ? 3 : 1
+            columns: root.width > 750 ? 4 : (root.width > 480 ? 2 : 1)
             rowSpacing: 10
             columnSpacing: 14
 
@@ -65,7 +75,28 @@ ScrollView {
                     spacing: 10
                     Text { text: "✓"; color: "#27ae60"; font.bold: true; font.pixelSize: 20 }
                     Text {
-                        text: ((edgepadController && edgepadController.doctorReport && edgepadController.doctorReport.summary) ? edgepadController.doctorReport.summary.ok : "5") + " Passed"
+                        text: ((edgepadController && edgepadController.doctorReport && edgepadController.doctorReport.summary) ? (edgepadController.doctorReport.summary.ok !== undefined ? edgepadController.doctorReport.summary.ok : edgepadController.doctorReport.summary.pass) : "0") + " Passed"
+                        color: "#ffffff"
+                        font.bold: true
+                        font.pixelSize: 14
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: 56
+                radius: 8
+                color: "#1e2637"
+                border.color: "#2980b9"
+                border.width: 1
+
+                RowLayout {
+                    anchors.centerIn: parent
+                    spacing: 10
+                    Text { text: "ℹ"; color: "#2980b9"; font.bold: true; font.pixelSize: 20 }
+                    Text {
+                        text: ((edgepadController && edgepadController.doctorReport && edgepadController.doctorReport.summary) ? (edgepadController.doctorReport.summary.info || 0) : "0") + " Info"
                         color: "#ffffff"
                         font.bold: true
                         font.pixelSize: 14
@@ -164,13 +195,17 @@ ScrollView {
                                     implicitHeight: 20
                                     radius: 3
                                     color: {
-                                        if (modelData.level === "ok") return "#27ae60"
+                                        if (modelData.level === "ok" || modelData.level === "pass") return "#27ae60"
+                                        if (modelData.level === "info") return "#2980b9"
                                         if (modelData.level === "warn") return "#d35400"
                                         return "#c0392b"
                                     }
                                     Text {
                                         anchors.centerIn: parent
-                                        text: (modelData.level || "ok").toUpperCase()
+                                        text: {
+                                            if (modelData.level === "ok" || modelData.level === "pass") return "PASS"
+                                            return (modelData.level || "INFO").toUpperCase()
+                                        }
                                         color: "#ffffff"
                                         font.bold: true
                                         font.pixelSize: 10

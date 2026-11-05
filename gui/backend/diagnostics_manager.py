@@ -53,7 +53,7 @@ class DiagnosticsManager:
             exit_code = 1
 
         items = []
-        summary = {"ok": 0, "warn": 0, "fail": 0, "result": "unknown"}
+        summary = {"ok": 0, "pass": 0, "info": 0, "warn": 0, "fail": 0, "result": "unknown"}
 
         current_section = "General"
         for line in raw_text.splitlines():
@@ -67,7 +67,7 @@ class DiagnosticsManager:
                 continue
 
             # Summary lines
-            if "ok=" in line_str and "warn=" in line_str:
+            if "ok=" in line_str or "pass=" in line_str:
                 for part in line_str.split():
                     if "=" in part:
                         k, v = part.split("=", 1)
@@ -75,14 +75,18 @@ class DiagnosticsManager:
                             summary[k] = int(v)
                         except ValueError:
                             pass
+                if "pass" in summary and "ok" not in summary:
+                    summary["ok"] = summary["pass"]
+                elif "ok" in summary and "pass" not in summary:
+                    summary["pass"] = summary["ok"]
                 continue
             if line_str.startswith("result:"):
                 summary["result"] = line_str.replace("result:", "").strip()
                 continue
 
-            # Check lines like: "ok    touchpad   /dev/input/event4..." or "warn  udev tags  ..."
+            # Check lines like: "ok    touchpad   /dev/input/event4..." or "info  config  ..." or "warn  udev tags  ..."
             parts = line_str.split(None, 2)
-            if len(parts) >= 2 and parts[0] in ["ok", "warn", "fail"]:
+            if len(parts) >= 2 and parts[0] in ["pass", "ok", "info", "warn", "fail"]:
                 level = parts[0]
                 name = parts[1]
                 details = parts[2] if len(parts) > 2 else ""

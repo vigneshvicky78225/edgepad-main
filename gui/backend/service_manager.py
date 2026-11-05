@@ -20,7 +20,11 @@ class ServiceManager:
     SERVICE_NAME = "edgepad.service"
 
     def __init__(self) -> None:
-        self.user_systemd_dir = Path.home() / ".config" / "systemd" / "user"
+        xdg_config = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config and xdg_config.strip():
+            self.user_systemd_dir = Path(xdg_config.strip()) / "systemd" / "user"
+        else:
+            self.user_systemd_dir = Path.home() / ".config" / "systemd" / "user"
         self.service_file_path = self.user_systemd_dir / self.SERVICE_NAME
 
     def find_edgepad_binary(self) -> str:
@@ -66,8 +70,16 @@ class ServiceManager:
             return False, f"Could not read user service: {e}"
 
         reasons = []
-        if "/home/vicky" in content:
-            reasons.append("References hardcoded developer path '/home/vicky'")
+        current_home = str(Path.home())
+        for token in content.split():
+            parts = token.split("=")
+            target_part = parts[-1]
+            if target_part.startswith("/home/") and not target_part.startswith(current_home):
+                reasons.append(f"References hardcoded home path for different user ('{target_part}')")
+                break
+        if "/home/vicky" in content and current_home != "/home/vicky":
+            if not any("References hardcoded home path" in r for r in reasons):
+                reasons.append("References hardcoded developer path '/home/vicky'")
         if "%h/.local/bin/edgepad" in content:
             local_bin = Path.home() / ".local" / "bin" / "edgepad"
             if not local_bin.exists():

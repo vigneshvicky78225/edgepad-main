@@ -15,6 +15,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 # Add repo root to sys.path
@@ -1040,6 +1041,119 @@ class TestEdgepadGuiBackend(unittest.TestCase):
 
         ctrl.lastMessage = ""
         self.assertEqual(ctrl.lastMessage, "")
+
+
+    def test_config_first_launch_initialization_and_xdg(self):
+        """Verify first-launch initializes valid default configuration on disk using XDG directories."""
+        from gui.backend.config_manager import (
+            get_xdg_config_home,
+            get_xdg_data_home,
+            get_default_config_path,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_root:
+            custom_config = Path(tmp_root) / "my_config"
+            custom_data = Path(tmp_root) / "my_data"
+
+            with mock.patch.dict(
+                os.environ,
+                {"XDG_CONFIG_HOME": str(custom_config), "XDG_DATA_HOME": str(custom_data)},
+            ):
+                self.assertEqual(get_xdg_config_home(), custom_config)
+                self.assertEqual(get_xdg_data_home(), custom_data)
+                expected_cfg_file = custom_config / "edgepad" / "edgepad.toml"
+                self.assertEqual(get_default_config_path(), expected_cfg_file)
+
+                # Prior to load, file does not exist
+                self.assertFalse(expected_cfg_file.exists())
+
+                cm = ConfigManager()
+                cfg, err = cm.load_config()
+                self.assertIsNone(err)
+                self.assertIn("device", cfg)
+                self.assertIn("gestures", cfg)
+
+                # On first launch, file was initialized on disk
+                self.assertTrue(expected_cfg_file.exists())
+                with open(expected_cfg_file, "r") as f:
+                    content = f.read()
+                self.assertIn("[hitbox]", content)
+                self.assertIn("[gesture]", content)
+
+    def test_config_malformed_backup_preservation(self):
+        """Verify malformed configuration creates a timestamped backup and does not overwrite user data."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg_path = Path(tmp_dir) / "edgepad.toml"
+            malformed_text = "[broken toml syntax\nfoo = = =\n"
+            cfg_path.write_text(malformed_text, encoding="utf-8")
+
+            cm = ConfigManager(cfg_path)
+            loaded, err = cm.load_config()
+            self.assertIsNotNone(err)
+            self.assertIn("Failed to load config", err)
+            self.assertIn("backup", err.lower())
+
+            # Original malformed file is preserved untouched
+            self.assertEqual(cfg_path.read_text(encoding="utf-8"), malformed_text)
+
+            # Backup directory contains the backup file
+            backups = list(cm.backups_dir.glob("edgepad.toml.bak.*"))
+            self.assertGreaterEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), malformed_text)
+
+    def test_diagnostics_manager_parses_four_states(self):
+        """Verify DiagnosticsManager parses PASS, INFO, WARN, and FAIL lines and summaries."""
+        from gui.backend.diagnostics_manager import DiagnosticsManager
+
+        mock_output = (
+            "edgepad doctor\n"
+            "Installation\n"
+            "  pass  config-dir       ~/.config/edgepad\n"
+            "  info  device-config    device set to auto\n"
+            "Hardware\n"
+            "  warn  udev tags        /dev/input/event4 lacks uaccess\n"
+            "  fail  permissions      cannot read /dev/uinput\n"
+            "Summary\n"
+            "  pass=1 ok=1 info=1 warn=1 fail=1\n"
+            "  result: fail\n"
+        )
+
+        dm = DiagnosticsManager(edgepad_bin="/bin/true")
+        with mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = mock.MagicMock(
+                stdout=mock_output, stderr="", returncode=1
+            )
+            report = dm.run_doctor()
+
+        self.assertEqual(report["summary"]["info"], 1)
+        self.assertEqual(report["summary"]["warn"], 1)
+        self.assertEqual(report["summary"]["fail"], 1)
+        self.assertEqual(report["summary"]["result"], "fail")
+
+        items = report["items"]
+        self.assertEqual(len(items), 4)
+        levels = [item["level"] for item in items]
+        self.assertIn("pass", levels)
+        self.assertIn("info", levels)
+        self.assertIn("warn", levels)
+        self.assertIn("fail", levels)
+
+    def test_service_manager_detects_foreign_user_path(self):
+        """Verify ServiceManager flags systemd user units containing other users' home directories."""
+        from gui.backend.service_manager import ServiceManager
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sm = ServiceManager()
+            fake_unit = Path(tmp_dir) / "edgepad.service"
+            fake_unit.write_text(
+                "[Unit]\nDescription=Test\n[Service]\nExecStart=/home/someotheruser/.local/bin/edgepad daemon\n",
+                encoding="utf-8",
+            )
+            sm.service_file_path = fake_unit
+
+            is_legacy, reasons = sm.detect_legacy_unit()
+            self.assertTrue(is_legacy)
+            self.assertIn("different user", reasons)
 
 
 if __name__ == "__main__":

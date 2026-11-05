@@ -83,6 +83,7 @@ class EdgepadController(QObject):
     workspaceSupportChanged = Signal()
     recordingActiveChanged = Signal(bool)
     swipeShortcutRecorded = Signal(list, str)
+    touchPositionChanged = Signal()
 
     def __init__(self, parent: QObject | None = None, config_path: Path | None = None) -> None:
         super().__init__(parent)
@@ -115,6 +116,7 @@ class EdgepadController(QObject):
             "tap_max_movement": 116,
         }
         self._last_gesture: dict[str, Any] = {}
+        self._touch_position: dict[str, Any] = {"active": False, "x": 0.5, "y": 0.5, "slot": 0, "zone": ""}
         self._last_error = ""
         self._last_message = ""
         self._dismissed_error = ""
@@ -436,6 +438,10 @@ class EdgepadController(QObject):
     @Property(dict, notify=lastGestureChanged)
     def lastGesture(self) -> dict[str, Any]:
         return self._last_gesture
+
+    @Property(dict, notify=touchPositionChanged)
+    def touchPosition(self) -> dict[str, Any]:
+        return self._touch_position
 
     @Property(str, notify=lastErrorChanged)
     def lastError(self) -> str:
@@ -1169,6 +1175,18 @@ class EdgepadController(QObject):
             return format_shortcut([keys]) if keys else "None"
         return "None"
 
+    @Slot(str, result=str)
+    def friendlyKeyName(self, key_name: str) -> str:
+        """Translates internal evdev key name (e.g. KEY_BRIGHTNESSUP) into a human-readable title."""
+        if not key_name:
+            return ""
+        for k in KNOWN_KEYS:
+            if k["name"] == key_name:
+                return k["friendly"]
+        if key_name.startswith("KEY_"):
+            return key_name[4:].replace("_", " ").title()
+        return key_name
+
     # --- Slots: Command Validation & Workspace Helpers ---
 
     @Slot(str, str, result="QVariantMap")
@@ -1359,6 +1377,52 @@ class EdgepadController(QObject):
         }
         self.lastGestureChanged.emit()
         self._set_message(f"Simulated {name} -> {action_str} (Safe Test Mode)")
+
+        # Animate simulated contact position on touchpad visualizer
+        target_x = 0.5
+        target_y = 0.5
+        edge_lower = str(edge).lower()
+        dir_lower = str(direction).lower()
+        if "left" in edge_lower and "top" not in edge_lower and "bottom" not in edge_lower:
+            target_x = 0.06
+            target_y = 0.3 if dir_lower == "up" else 0.7
+        elif "right" in edge_lower and "top" not in edge_lower and "bottom" not in edge_lower:
+            target_x = 0.94
+            target_y = 0.3 if dir_lower == "up" else 0.7
+        elif "top" in edge_lower and "left" not in edge_lower and "right" not in edge_lower:
+            target_x = 0.3 if dir_lower == "left" else 0.7
+            target_y = 0.06
+        elif "bottom" in edge_lower and "left" not in edge_lower and "right" not in edge_lower:
+            target_x = 0.3 if dir_lower == "left" else 0.7
+            target_y = 0.94
+        elif "top-left" in edge_lower or "top_left" in edge_lower:
+            target_x = 0.07
+            target_y = 0.07
+        elif "top-right" in edge_lower or "top_right" in edge_lower:
+            target_x = 0.93
+            target_y = 0.07
+        elif "bottom-left" in edge_lower or "bottom_left" in edge_lower:
+            target_x = 0.07
+            target_y = 0.93
+        elif "bottom-right" in edge_lower or "bottom_right" in edge_lower:
+            target_x = 0.93
+            target_y = 0.93
+
+        self._touch_position = {
+            "active": True,
+            "x": target_x,
+            "y": target_y,
+            "slot": 0,
+            "zone": edge,
+        }
+        self.touchPositionChanged.emit()
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1200, self._clear_simulated_touch)
+
+    def _clear_simulated_touch(self) -> None:
+        if self._touch_position.get("active"):
+            self._touch_position = {"active": False, "x": 0.5, "y": 0.5, "slot": 0, "zone": ""}
+            self.touchPositionChanged.emit()
 
     @Slot(float, float, float, float, float, float)
     def updateHitboxSettings(
@@ -1631,6 +1695,17 @@ class EdgepadController(QObject):
 
     def _on_ipc_event(self, event_data: dict[str, Any]) -> None:
         """Handles live gesture event sent by daemon IPC."""
+        if event_data.get("event") == "touch_position":
+            self._touch_position = {
+                "active": bool(event_data.get("active", True)),
+                "x": float(event_data.get("x", 0.5)),
+                "y": float(event_data.get("y", 0.5)),
+                "slot": int(event_data.get("slot", 0)),
+                "zone": str(event_data.get("zone", "")),
+            }
+            self.touchPositionChanged.emit()
+            return
+
         # Prevent duplicate input event spam within 100ms
         import time as _time
         now_ts = _time.time()

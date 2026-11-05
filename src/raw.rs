@@ -38,6 +38,7 @@ pub const BTN_TOOL_QUADTAP: u16 = 0x14f;
 
 pub const ABS_X: u16 = 0x00;
 pub const ABS_Y: u16 = 0x01;
+pub const ABS_PRESSURE: u16 = 0x18;
 pub const ABS_MT_SLOT: u16 = 0x2f;
 pub const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
 pub const ABS_MT_TOUCH_MINOR: u16 = 0x31;
@@ -128,6 +129,22 @@ impl RawEvent {
 
     pub const fn abs_mt_position_y(y: i32) -> Self {
         Self::new(EV_ABS, ABS_MT_POSITION_Y, y)
+    }
+
+    pub const fn abs_mt_pressure(value: i32) -> Self {
+        Self::new(EV_ABS, ABS_MT_PRESSURE, value)
+    }
+
+    pub const fn abs_mt_touch_major(value: i32) -> Self {
+        Self::new(EV_ABS, ABS_MT_TOUCH_MAJOR, value)
+    }
+
+    pub const fn abs_mt_touch_minor(value: i32) -> Self {
+        Self::new(EV_ABS, ABS_MT_TOUCH_MINOR, value)
+    }
+
+    pub const fn abs_pressure(value: i32) -> Self {
+        Self::new(EV_ABS, ABS_PRESSURE, value)
     }
 }
 
@@ -824,6 +841,7 @@ fn absolute_axis_code_for_name(name: &str) -> Option<u16> {
     match name {
         "ABS_X" => Some(ABS_X),
         "ABS_Y" => Some(ABS_Y),
+        "ABS_PRESSURE" => Some(ABS_PRESSURE),
         "ABS_MT_SLOT" => Some(ABS_MT_SLOT),
         "ABS_MT_TOUCH_MAJOR" => Some(ABS_MT_TOUCH_MAJOR),
         "ABS_MT_TOUCH_MINOR" => Some(ABS_MT_TOUCH_MINOR),
@@ -923,15 +941,96 @@ pub fn route_resync_contacts(
     })
 }
 
+fn is_mt_attribute_code(code: u16) -> bool {
+    matches!(
+        code,
+        ABS_MT_PRESSURE
+            | ABS_MT_TOUCH_MAJOR
+            | ABS_MT_TOUCH_MINOR
+            | ABS_MT_WIDTH_MAJOR
+            | ABS_MT_WIDTH_MINOR
+            | ABS_MT_ORIENTATION
+            | ABS_MT_TOOL_TYPE
+            | ABS_MT_BLOB_ID
+            | ABS_MT_DISTANCE
+    )
+}
+
 fn raw_passthrough_events_for_core_passthrough(
-    _frame: &RawFrame,
+    frame: &RawFrame,
     core_passthrough: &[Event],
 ) -> Vec<RawEvent> {
-    core_passthrough
-        .iter()
-        .copied()
-        .filter_map(raw_event_for_core_event)
-        .collect()
+    let mut current_slot = 0;
+    let mut slot_attributes: std::collections::BTreeMap<i32, Vec<RawEvent>> =
+        std::collections::BTreeMap::new();
+    let mut frame_abs_pressure: Option<RawEvent> = None;
+
+    for event in &frame.events {
+        if event.kind == EV_ABS {
+            if event.code == ABS_MT_SLOT {
+                current_slot = event.value;
+            } else if is_mt_attribute_code(event.code) {
+                slot_attributes
+                    .entry(current_slot)
+                    .or_default()
+                    .push(*event);
+            } else if event.code == ABS_PRESSURE {
+                frame_abs_pressure = Some(*event);
+            }
+        }
+    }
+
+    let mut passthrough = Vec::new();
+    let mut active_slot: Option<i32> = None;
+    let mut has_active_contact = false;
+
+    for &core_ev in core_passthrough {
+        match core_ev {
+            Event::Slot(slot) => {
+                if let Some(prev_slot) = active_slot {
+                    if let Some(attrs) = slot_attributes.remove(&prev_slot) {
+                        passthrough.extend(attrs);
+                    }
+                }
+                active_slot = Some(slot);
+                passthrough.push(RawEvent::abs_mt_slot(slot));
+            }
+            Event::TrackingId(id) => {
+                if id >= 0 {
+                    has_active_contact = true;
+                }
+                passthrough.push(RawEvent::abs_mt_tracking_id(id));
+            }
+            Event::X(x) => {
+                has_active_contact = true;
+                passthrough.push(RawEvent::abs_mt_position_x(x));
+            }
+            Event::Y(y) => {
+                has_active_contact = true;
+                passthrough.push(RawEvent::abs_mt_position_y(y));
+                if let Some(slot) = active_slot {
+                    if let Some(attrs) = slot_attributes.remove(&slot) {
+                        passthrough.extend(attrs);
+                    }
+                }
+            }
+            Event::SynDropped => {}
+        }
+    }
+
+    if let Some(slot) = active_slot {
+        if let Some(attrs) = slot_attributes.remove(&slot) {
+            passthrough.extend(attrs);
+        }
+    }
+
+    if has_active_contact {
+        if let Some(pressure) = frame_abs_pressure {
+            passthrough.push(pressure);
+        }
+    }
+
+    passthrough
 }
 
 fn raw_event_for_core_event(event: Event) -> Option<RawEvent> {

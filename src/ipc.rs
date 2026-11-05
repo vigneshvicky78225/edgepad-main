@@ -153,9 +153,11 @@ fn run_ipc_listener_loop(
                 let handler_clone = handler.clone();
                 let stop_conn = stop.clone();
 
-                thread::spawn(move || {
-                    handle_ipc_connection(stream, broadcaster_clone, handler_clone, stop_conn);
-                });
+                let _ = thread::Builder::new()
+                    .name("edgepad-ipc-client".to_string())
+                    .spawn(move || {
+                        handle_ipc_connection(stream, broadcaster_clone, handler_clone, stop_conn);
+                    });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
@@ -177,6 +179,10 @@ fn handle_ipc_connection(
         Ok(s) => s,
         Err(_) => return,
     };
+    let mut write_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
     broadcaster.add_client(stream);
 
     let mut reader = BufReader::new(read_stream);
@@ -192,7 +198,12 @@ fn handle_ipc_connection(
                     continue;
                 }
                 if let Some(response) = handler(trimmed) {
-                    broadcaster.broadcast(&response);
+                    let mut msg = response;
+                    if !msg.ends_with('\n') {
+                        msg.push('\n');
+                    }
+                    let _ = write_stream.write_all(msg.as_bytes());
+                    let _ = write_stream.flush();
                 }
             }
             Err(ref e)

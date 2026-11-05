@@ -66,7 +66,7 @@ pub fn classify_device(caps: &EventDeviceCapabilities) -> DeviceKind {
 
     if has_type_b_multitouch && caps.is_direct {
         DeviceKind::Touchscreen
-    } else if has_type_b_multitouch && caps.is_pointer {
+    } else if has_type_b_multitouch && (caps.is_pointer || caps.is_buttonpad) {
         DeviceKind::Touchpad
     } else {
         DeviceKind::Other

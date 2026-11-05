@@ -244,7 +244,8 @@ Item {
                                                 }
                                                 if (act.type === "key") {
                                                     var rep = (act.repeat && act.repeat > 1) ? (" (×" + act.repeat + ")") : ""
-                                                    return "Key: " + (act.key || "UNKNOWN") + rep
+                                                    var friendly = edgepadController ? edgepadController.friendlyKeyName(act.key || "") : (act.key || "UNKNOWN")
+                                                    return "Key: " + friendly + rep
                                                 }
                                                 if (act.type === "command") {
                                                     return "Command: " + (act.argv ? act.argv.join(" ") : "")

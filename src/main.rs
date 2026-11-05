@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use edgepad::actions::{ActionDispatcher, ActionDispatcherStats};
 use edgepad::config::{
-    default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
+    default_edgepad_config_path, ensure_edgepad_config, load_edgepad_config, DeviceConfig,
+    EdgepadConfig, EnsureConfigResult,
 };
 use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, GestureDirection, SliderDirection,
@@ -173,6 +174,7 @@ const DUMP_FIRST_EVENT_WARNING_TIMEOUT: Duration = Duration::from_secs(3);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const DAEMON_RECONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const DAEMON_ACTION_QUEUE_CAPACITY: usize = 32;
 const DAEMON_STARTUP_RETRY_ENV: &str = "EDGEPAD_DAEMON_STARTUP_RETRY_MS";
 
@@ -699,9 +701,30 @@ fn load_daemon_config(path: &Path) -> Result<EdgepadConfig, String> {
         Ok(metadata) if !metadata.is_file() => {
             Err(format!("daemon config path is not a file: {}", path.display()))
         }
-        Ok(_) => load_edgepad_config(path),
+        Ok(_) => match load_edgepad_config(path) {
+            Ok(config) => Ok(config),
+            Err(err) => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let backup_dir = path.parent().unwrap_or_else(|| Path::new(".")).join("backups");
+                let _ = fs::create_dir_all(&backup_dir);
+                let backup_path = backup_dir.join(format!(
+                    "{}.bak.{}",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("edgepad.toml"),
+                    timestamp
+                ));
+                let _ = fs::copy(path, &backup_path);
+                Err(format!(
+                    "daemon config at {} is malformed: {err}; preserved backup at {} (safe remediation: fix syntax or run 'edgepad doctor --repair')",
+                    path.display(),
+                    backup_path.display()
+                ))
+            }
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(format!(
-            "daemon config not found: {}; pass --config <file> or create it from /usr/share/edgepad/edgepad.toml",
+            "daemon config not found: {}; pass --config <file> or create it from /usr/share/edgepad/edgepad.toml (or run 'edgepad doctor --repair')",
             path.display()
         )),
         Err(err) => Err(format!(
@@ -829,6 +852,16 @@ fn devices(root: &Path, show_all: bool) -> Result<(), String> {
 fn doctor(config: &DoctorConfig) -> Result<i32, String> {
     if config.repair {
         println!("edgepad doctor: repairing installation and service state...");
+        match edgepad::doctor::repair_config(config.config_path.as_deref()) {
+            Ok(actions) => {
+                for act in actions {
+                    println!("  ✓ {act}");
+                }
+            }
+            Err(e) => {
+                eprintln!("  ✗ Config repair error: {e}");
+            }
+        }
         match edgepad::doctor::repair_service(&config.service_name) {
             Ok(actions) => {
                 for act in actions {
@@ -836,7 +869,7 @@ fn doctor(config: &DoctorConfig) -> Result<i32, String> {
                 }
             }
             Err(e) => {
-                eprintln!("  ✗ Repair error: {e}");
+                eprintln!("  ✗ Service repair error: {e}");
             }
         }
         println!();
@@ -892,8 +925,8 @@ fn print_doctor_report(report: &DoctorReport) {
     println!();
     println!("Summary");
     println!(
-        "  ok={} warn={} fail={}",
-        counts.ok, counts.warn, counts.fail
+        "  pass={} ok={} info={} warn={} fail={}",
+        counts.ok, counts.ok, counts.info, counts.warn, counts.fail
     );
     println!("  result: {}", doctor_result_label(report));
 }
@@ -1313,8 +1346,18 @@ fn gui(args: &[String]) -> Result<(), String> {
         }
     }
 
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        candidates.push(PathBuf::from(data_home).join("edgepad/gui/main.py"));
+    }
+
     if let Ok(home) = env::var("HOME") {
         candidates.push(PathBuf::from(home).join(".local/share/edgepad/gui/main.py"));
+    }
+
+    if let Some(data_dirs) = env::var_os("XDG_DATA_DIRS").filter(|v| !v.is_empty()) {
+        for dir in env::split_paths(&data_dirs) {
+            candidates.push(dir.join("edgepad/gui/main.py"));
+        }
     }
 
     candidates.push(PathBuf::from("/usr/share/edgepad/gui/main.py"));
@@ -1373,6 +1416,7 @@ fn run_daemon_proxy_with_startup_retry(
     let started_at = Instant::now();
     let mut last_announced_device: Option<PathBuf> = None;
     let mut retry_announced = false;
+    let mut initial_startup_completed = false;
 
     loop {
         if stop.is_stopped() {
@@ -1410,6 +1454,7 @@ fn run_daemon_proxy_with_startup_retry(
                 },
                 runtime,
                 &mut |ready_device| {
+                    initial_startup_completed = true;
                     if edgepad::notify::notify_ready(ready_device)? {
                         eprintln!(
                             "edgepad daemon: systemd ready notification sent for {}",
@@ -1423,6 +1468,34 @@ fn run_daemon_proxy_with_startup_retry(
 
         match run_result {
             Ok(summary) => return Ok(Some(summary)),
+            Err(err) if initial_startup_completed && is_device_disconnect_or_read_error(&err) => {
+                eprintln!("edgepad daemon: device disconnected ({err}); waiting for reconnection...");
+                if let Some(broadcaster) = runtime.dispatcher.broadcaster() {
+                    broadcaster.broadcast(r#"{"event":"device_disconnected"}"#);
+                }
+                last_announced_device = None;
+
+                while !stop.is_stopped() {
+                    let _ = runtime.apply_pending_reload();
+                    let current_config = runtime.active_config().clone();
+                    if let Ok(candidate) = current_config.device.resolve(input_root) {
+                        if evdev::Device::open(&candidate).is_ok() {
+                            eprintln!("edgepad daemon: device reconnected: {}", candidate.display());
+                            if let Some(broadcaster) = runtime.dispatcher.broadcaster() {
+                                broadcaster.broadcast(&format!(
+                                    r#"{{"event":"device_connected","device":"{}"}}"#,
+                                    candidate.display()
+                                ));
+                            }
+                            break;
+                        }
+                    }
+                    if !wait_for_daemon_startup_retry(&stop, DAEMON_RECONNECT_RETRY_INTERVAL) {
+                        eprintln!("edgepad daemon: stopped during device reconnection");
+                        return Ok(None);
+                    }
+                }
+            }
             Err(err) if should_retry_daemon_startup_error(&err) => {
                 let elapsed = started_at.elapsed();
                 if startup_retry_timeout == Duration::ZERO || elapsed >= startup_retry_timeout {
@@ -1464,8 +1537,22 @@ fn wait_for_daemon_startup_retry(stop: &StopToken, delay: Duration) -> bool {
     !stop.is_stopped()
 }
 
+fn is_device_disconnect_or_read_error(err: &str) -> bool {
+    err.contains("No such device")
+        || err.contains("os error 19")
+        || err.contains("Input/output error")
+        || err.contains("os error 5")
+        || err.contains("No such device or address")
+        || err.contains("os error 6")
+        || err.contains("Bad file descriptor")
+        || err.contains("os error 9")
+        || err.starts_with("failed to read events from proxy device")
+        || err.starts_with("failed to wait for proxy events")
+}
+
 fn should_retry_daemon_startup_error(err: &str) -> bool {
-    err.starts_with("device=auto found no event devices")
+    is_device_disconnect_or_read_error(err)
+        || err.starts_with("device=auto found no event devices")
         || err.starts_with("device=auto found no readable event devices")
         || err.starts_with("device=auto found no touchpad candidates")
         || err.starts_with("failed to list ")
